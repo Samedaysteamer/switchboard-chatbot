@@ -1,27 +1,15 @@
-// Same Day Steamerz — production chat with 3 Zapier webhooks
-// - TURN LOG (one-time per session *at end*): u9477fj   (given)
-// - PARTIAL/SESSION (captured once after phone or special handoffs): env ZAP_SESSION_URL
-// - COMPLETE BOOKING: u13zg9e
-//
-// Notes:
-// • We DO NOT zap per turn. We append each turn to state._turns and send ONE final log at session end.
-// • Session-end points: booking complete, OOA handoff, >3rd floor handoff, explicit opt-out path,
-//   or follow-up timeout. Guarded by state._turnLogSent to prevent duplicates.
-
-const fetch = global.fetch || require("node-fetch");
-
-/* ========================= Webhooks ========================= */
-// 🔒 TURN LOG (one-time at session end) — given by Ben
-const ZAPIER_TURNLOG_URL = "https://hooks.zapier.com/hooks/catch/3165661/u9477fj/";
-// ✅ COMPLETE BOOKING
-const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/";
-// ✅ PARTIAL / SESSION — supply via env so it never collides with the Turn Log
-const ZAPIER_SESSION_URL = process.env.ZAP_SESSION_URL || ""; // e.g. https://hooks.zapier.com/hooks/catch/3165661/xxxxxxxx/
+// Same Day Steamerz — baseline with duct quick replies, notes quick replies,
+// sofa/loveseat cushion follow-up, ALWAYS show quick replies on notes prompt,
+// stricter smart-correction gating, relaxed address parsing, pet-odor guidance,
+// and explicit "we do NOT offer" answers for water damage extraction, tile/grout,
+// and hardwood floor cleaning.  (Facebook $100 version)
 
 /* ========================= Utilities ========================= */
-const SMALL = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
+const SMALL = {
+  zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
-  seventeen:17, eighteen:18, nineteen:19, twenty:20 };
+  seventeen:17, eighteen:18, nineteen:19, twenty:20
+};
 const TENS  = { twenty:20, thirty:30, forty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90 };
 
 function wordsToNumber(v=""){
@@ -37,112 +25,13 @@ function wordsToNumber(v=""){
   }
   return total + current || 0;
 }
-const numFromText = (s="") => { const m = s.match(/\d+/); return m ? +m[0] : wordsToNumber(s); };
+const numFromText = (s="") => {
+  const m = s.match(/\d+/);
+  return m ? +m[0] : wordsToNumber(s);
+};
 const isQuestion = (t="") =>
   /\?$/.test(t.trim()) ||
   /^(what|when|how|who|where|why|do|does|can|is|are|should|could|would|are y|am i)\b/i.test(t);
-
-const normalizeDigits = (s='') => String(s).replace(/\D+/g,'');
-const formatPhone = digits => (digits && digits.length===10)
-  ? `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`
-  : digits;
-
-function encodeForm(data){
-  return Object.keys(data).map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? "")).join("&");
-}
-
-// Cap long strings so Google Sheets / Zap steps don't choke
-function safeStr(v, max = 25000) {
-  const s = (v == null) ? "" : String(v);
-  return s.length > max ? s.slice(0, max) + `\n[TRUNCATED ${s.length - max} chars]` : s;
-}
-
-/* ====== Session transcript helpers (single final Turn Log) ====== */
-function initSessionState(state) {
-  if (!state._sessionId) state._sessionId = Math.random().toString(36).slice(2);
-  if (!state._sessionStart) state._sessionStart = new Date().toISOString();
-  if (!Array.isArray(state._turns)) state._turns = [];
-  return state;
-}
-function appendTurn(state, { user, bot, stepBefore, stepAfter, quickReplies, intentHandled, error }) {
-  initSessionState(state);
-  state._turns.push({
-    t: new Date().toISOString(),
-    user: user || "",
-    bot: bot || "",
-    stepBefore: stepBefore || "",
-    stepAfter: stepAfter || "",
-    quick: Array.isArray(quickReplies) ? quickReplies : [],
-    intent: intentHandled || "",
-    err: error ? String(error) : ""
-  });
-}
-function transcriptToText(turns=[]) {
-  const lines = [];
-  for (const r of turns) {
-    lines.push(`[${r.t}] STEP ${r.stepBefore} → ${r.stepAfter}`);
-    if (r.user) lines.push(`U> ${r.user}`);
-    if (r.bot)  lines.push(`B> ${r.bot}`);
-    if (r.quick && r.quick.length) lines.push(`Q> ${r.quick.join(" | ")}`);
-    if (r.intent) lines.push(`I> ${r.intent}`);
-    if (r.err)    lines.push(`E> ${r.err}`);
-  }
-  return safeStr(lines.join("\n"));
-}
-async function sendTurnLog(payload){
-  try {
-    await fetch(ZAPIER_TURNLOG_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: encodeForm(payload)
-    });
-  } catch (err) {
-    console.error("Turn Log Zap failed", err);
-  }
-}
-async function sendFinalTurnLogOnce(state, reason) {
-  try {
-    initSessionState(state);
-    if (state._turnLogSent) return;
-    state._turnLogSent = true;
-
-    const payload = {
-      // routing / audit
-      variant: process.env.BOT_VARIANT || "",
-      session_id: state._sessionId || "",
-      session_started_at: state._sessionStart || "",
-      session_ended_at: new Date().toISOString(),
-      reason: reason || "",
-
-      // contact + job context
-      name: displayName(state),
-      phone: displayPhone(state),
-      email: displayEmail(state),
-      address: displayAddress(state),
-      zip: state.zip || "",
-      date: state.date || "",
-      window: state.window || "",
-      pets: state.pets || "",
-      outdoor_water: state.outdoorWater || "",
-      building: state.building || "",
-      floor: state.floor || "",
-
-      // services + pricing
-      services: selectedServiceForZap(state),
-      cleaning_breakdown: buildCleaningBreakdownForZap(state),
-      total_price: totalPriceForZap(state),
-
-      // compact + full logs
-      snapshot: safeStr(snapshotForSession(state), 2000),
-      faq_count: Array.isArray(state.faqLog) ? state.faqLog.length : 0,
-      transcript: transcriptToText(state._turns || [])
-    };
-
-    await sendTurnLog(payload);
-  } catch (e) {
-    console.error("Final Turn Log failed", e);
-  }
-}
 
 /* ========================= Data ========================= */
 let validZipCodes = null;
@@ -164,6 +53,8 @@ function detectQuickIntents(text="") {
     human: /(human|agent|rep|representative)/.test(t),
     special: /(\$?\s*50\b|fifty\s*(?:dollars|special)|50\s*special)/.test(t),
     whatsDiff: /(what'?s the difference|difference between)/.test(t),
+
+    // FAQ themes
     drytime: /(how long.*dry|dry\s*time|hours.*dry|time.*dry|when.*dry)/.test(t),
     stain: /(stain|spots?|pet stain|red wine|coffee|urine|odor|smell|guarantee)/.test(t),
     petsKids: /(pet|dog|cat|animal|child|kid|baby|toddler).*(safe|okay|friendly)/.test(t),
@@ -176,7 +67,7 @@ function detectQuickIntents(text="") {
     dryerVent: /(dryer\s*vent|lint vent)/.test(t),
     sameDay: /(same[-\s]?day|today|next day|tomorrow).*?(available|availability|slot|open|appointment|service)/.test(t),
 
-    // Additional intents
+    // Additional intents you requested
     odor: /(odor|odour|smell|urine|pee|pet\s*odor|pet\s*smell)/.test(t),
     waterDamage: /(water\s*damage|flood(?:ed|ing)?|standing\s*water|water\s*extraction)/.test(t),
     tileGrout: /\btile\b.*\bgrout\b|\bgrout\b.*\btile\b|tile\s*clean|grout\s*clean/i.test(t),
@@ -184,7 +75,7 @@ function detectQuickIntents(text="") {
   };
 }
 
-// COPY UPDATED to reflect $100 minimum and the 2R + hallway promo
+// === UPDATED COPY FOR FACEBOOK $100 VERSION ===
 const stanleyRebuttal = () =>
 `We’re **Same Day Steamerz** — locally owned with **truck-mounted hot water extraction (~240°F)** and we stand behind every job.
 
@@ -215,21 +106,24 @@ function ductIntroCopy() {
 
 **1) Basic — $200 per system**  
 • Full cleaning of **all supply vents/branches** using a powerful negative-pressure vacuum (HEPA).  
+• Removes dust, debris, and allergens so your HVAC can breathe and your air quality improves.
 
 **2) Deep — $500 per system**  
-• Everything in Basic, **plus** the **return side + trunks**, register cleaning, and **EPA-registered sanitizer** fogged through ducts.
+• Everything in Basic, **plus** the **return side + trunks**, register cleaning, and **EPA-registered sanitizer** fogged through ducts to neutralize odor-causing bacteria/mildew.  
+• Best for **allergies, odors, concerns about mold/bacteria, ducts not cleaned in years, or post-construction/remodel**.
 
 Ready to choose a package?`);
 }
 
 const furnaceAddOnCopy = (pkg) =>
 `**Furnace Cleaning — Recommended add-on (${pkg === "Deep" ? "+$100" : "+$200"} per system)**  
-Open main return cabinet, remove buildup, **sanitize interior**. Add it now?`;
+We open the main air return cabinet to remove built-up dust and dirt, then **sanitize the interior** to help prevent mold and bacteria buildup and keep airflow strong. Add it now?`;
 
 const dryerVentCopy =
 `**Dryer Vent Cleaning — $200**  
-• Removes flammable lint (reduce fire risk)  
-• Restores airflow (faster drying)  
+• Helps **prevent dryer fires** by removing flammable lint  
+• Restores airflow so clothes **dry faster**  
+• Reduces strain on the dryer and can **extend appliance life**  
 Add dryer vent cleaning?`;
 
 /* ========================= FAQ Answers ========================= */
@@ -238,23 +132,28 @@ function answerFAQ(text="") {
   if (qi.stanley) return stanleyRebuttal();
   if (qi.special) return specialCopy();
 
-  if (qi.sameDay)   return "We often have **same-day or next-day availability**. Tell me your address and I’ll check the earliest arrival window.";
+  if (qi.sameDay)   return "We often have **same-day or next-day availability**. Tell me your address and I’ll check the earliest arrival window for your area.";
   if (qi.drytime)   return "Dry time is usually **4–8 hours**, depending on airflow, humidity, and carpet thickness.";
-  if (qi.stain)     return "We treat most stains (coffee, wine, pet accidents). **Bleach or burns** can be permanent.";
+  if (qi.stain)     return "We treat most stains (coffee, wine, pet accidents, etc.). Some like **bleach or burns** may be permanent.";
   if (qi.petsKids)  return "Yes — all products are **pet- and child-safe** when used as directed.";
   if (qi.furniture) return "We don’t move large furniture (beds, dressers, entertainment centers, sectionals). Please clear small items.";
-  if (qi.process)   return "We pre-spray, extract with **truck-mounted hot water (~240°F)**, then fiber rinse and deodorizer.";
+  if (qi.process)   return "We pre-spray, then clean with **truck-mounted hot water extraction** (~240°F), followed by a fiber rinse and free deodorizer.";
   if (qi.prep)      return "Please vacuum areas, ensure parking/access for hoses, and have water supply available.";
-  if (qi.leather)   return "We **do not clean leather upholstery** — fabric only.";
-  if (qi.upholsteryDry) return "Upholstery dry time: synthetics in hours; natural fibers longer. Good airflow helps.";
-  if (qi.furnace)   return "Furnace cabinet cleaning is **+$200 (Basic) / +$100 (Deep)** per system.";
-  if (qi.dryerVent) return "Dryer vent cleaning is **$200**.";
-  if (qi.odor)      return "We can treat **pet odors** with enzyme + hot-water extraction. If urine reached pad/subfloor, results vary; sealing/replacement may be needed. We’ll assess on arrival.";
-  if (qi.waterDamage) return "We **don’t offer water-damage/flood extraction** or remediation.";
-  if (qi.tileGrout)   return "We **don’t offer tile & grout cleaning** currently.";
-  if (qi.hardwood)    return "We **don’t offer hardwood floor cleaning** currently.";
+  if (qi.leather)   return "We **do not clean leather upholstery** — only fabric (sectionals, sofas, loveseats, recliners, etc.).";
+  if (qi.upholsteryDry) return "Upholstery dry time: synthetics in hours; natural fibers (cotton/linen) longer. Good airflow helps.";
+  if (qi.furnace)   return "Furnace cabinet cleaning opens the main return, removes buildup, and sanitizes. It’s **+$200 (Basic) or +$100 (Deep)** with duct cleaning.";
+  if (qi.dryerVent) return "Dryer vent cleaning is **$200** (standard run). It removes flammable lint to **reduce fire risk**.";
 
-  if (qi.location)  return "We cover **metro ATL and surrounding ZIPs**. Share your **ZIP code** and I’ll confirm.";
+  if (qi.odor) {
+    return (
+"We can treat **pet odors** with a specialized enzyme solution and hot-water carpet cleaning. Results depend on severity: if urine soaked through the **pad** into the **subfloor**, cleaning can improve but may not fully remove the odor — sometimes **replacement or sealing** is needed. Most customers clean first to see if it solves the issue; we’ll assess on arrival."
+    );
+  }
+  if (qi.waterDamage) return "We **don’t offer water-damage/flood extraction** or remediation. We handle **standard carpet/upholstery cleaning**. For emergencies, a local restoration company is recommended.";
+  if (qi.tileGrout)   return "We **don’t currently offer tile & grout cleaning.**";
+  if (qi.hardwood)    return "We **don’t currently offer hardwood floor cleaning.**";
+
+  if (qi.location)  return "We cover **metro ATL and surrounding ZIPs**. Share your **ZIP code** and I’ll confirm service in your area.";
   return null;
 }
 function logFAQ(state, q, a) {
@@ -263,14 +162,19 @@ function logFAQ(state, q, a) {
 }
 
 /* ========================= Pricing (Carpet) ========================= */
-// ⬇️ UPDATED: $100 minimum; and EXACT 2 rooms + 1 hallway bundle = $100
+// === UPDATED FOR FACEBOOK $100 VERSION ===
+// $100 minimum; and EXACT 2 rooms + 1 hallway bundle = $100
 function computeCarpetTotals(detail) {
   const d = { rooms:0, halls:0, stairs:0, extras:0, rugs:0, ...detail };
+
   const totalAreasBeforeFreebie = d.rooms + d.halls + d.stairs + d.extras + d.rugs;
+
   const freeHall = (totalAreasBeforeFreebie >= 4 && d.halls > 0) ? 1 : 0;
   const freeRoom = (totalAreasBeforeFreebie >= 6 && d.rooms > 0) ? 1 : 0;
+
   const chargeableRooms = Math.max(0, d.rooms - freeRoom);
   const chargeableHalls = Math.max(0, d.halls - freeHall);
+
   const billable = chargeableRooms + chargeableHalls + d.stairs + d.extras + d.rugs;
   let price = Math.max(100, billable * 50);
 
@@ -280,40 +184,56 @@ function computeCarpetTotals(detail) {
   }
 
   const parts = [];
-  if (d.rooms)  parts.push(`${d.rooms} room${d.rooms>1?"s":""}${freeRoom ? " (1 free)" : ""}`);
-  if (d.halls)  parts.push(`${d.halls} hallway${d.halls>1?"s":""}${freeHall ? " (1 free)" : ""}`);
+  if (d.rooms) parts.push(`${d.rooms} room${d.rooms>1?"s":""}${freeRoom ? " (1 free)" : ""}`);
+  if (d.halls) parts.push(`${d.halls} hallway${d.halls>1?"s":""}${freeHall ? " (1 free)" : ""}`);
   if (d.stairs) parts.push(`${d.stairs} flight${d.stairs>1?"s":""} of stairs`);
-  if (d.rugs)   parts.push(`${d.rugs} rug${d.rugs>1?"s":""}`);
+  if (d.rugs) parts.push(`${d.rugs} rug${d.rugs>1?"s":""}`);
   if (d.extras) parts.push(`${d.extras} extra area${d.extras>1?"s":""}`);
-  return { billable, price, describedText: parts.join(", "), detail: { ...d, freeHall, freeRoom } };
+
+  return {
+    billable,
+    price,
+    describedText: parts.join(", "),
+    detail: { ...d, freeHall, freeRoom }
+  };
 }
 
 function parseAreas(text="") {
   const t = text.toLowerCase();
 
+  // rooms / bedrooms
   let rooms = 0;
   for (const m of t.matchAll(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s*(?:rooms?|bedrooms?)/g)) {
     rooms += numFromText(m[1]);
   }
   if (rooms === 0 && /\brooms?\b/.test(t)) rooms = 1;
 
+  // hallways
   let halls = 0;
   const mh = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*hall(?:way|ways)?/);
-  if (mh) halls = numFromText(mh[1]); else if (/\bhall(?:way|ways)?\b/.test(t)) halls = 1;
+  if (mh) halls = numFromText(mh[1]);
+  else if (/\bhall(?:way|ways)?\b/.test(t)) halls = 1;
 
+  // stairs/flights
   let stairs = 0;
   const ms = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:flights?|stairs?)/);
-  if (ms) stairs = numFromText(ms[1]); else if (/\b(?:flights?|stairs?)\b/.test(t)) stairs = 1;
+  if (ms) stairs = numFromText(ms[1]);
+  else if (/\b(?:flights?|stairs?)\b/.test(t)) stairs = 1;
 
+  // rugs
   let rugs = 0;
   const mr = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:area\s*)?rugs?\b/);
-  if (mr) rugs = numFromText(mr[1]); else if (/\b(?:area\s*)?rugs?\b/.test(t)) rugs = 1;
+  if (mr) rugs = numFromText(mr[1]);
+  else if (/\b(?:area\s*)?rugs?\b/.test(t)) rugs = 1;
 
+  // extras (other common rooms)
   let extras = 0;
   const extraPatterns = [
-    "living room","family room","great room","den","bonus room","recreation room","rec room","game room",
-    "media room","theater room","dining room","breakfast nook","sunroom","solarium","mudroom",
-    "guest room","nursery","office","home office","loft","study","library","playroom","man cave","gym","exercise room"
+    "living room", "family room", "great room", "den", "bonus room",
+    "recreation room", "rec room", "game room", "media room", "theater room",
+    "dining room", "breakfast nook", "sunroom", "solarium", "mudroom",
+    "guest room", "nursery", "office", "home office", "loft", "study",
+    "library", "playroom", "man cave", "gym", "exercise room"
   ];
   for (const name of extraPatterns) {
     const rxCount = new RegExp(`(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)\\s+${name}`, "i");
@@ -322,12 +242,14 @@ function parseAreas(text="") {
     if (m) extras += numFromText(m[1]);
     else if (rxSingle.test(t)) extras++;
   }
+
   return computeCarpetTotals({ rooms, halls, stairs, extras, rugs });
 }
 
 /* ========================= Upholstery ========================= */
 function priceUphFromItems(items) {
-  let total = 0, hasSectional = false;
+  let total = 0;
+  let hasSectional = false;
   const breakdown = [];
 
   for (const it of items) {
@@ -368,19 +290,51 @@ function parseUph(text="") {
       ? /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:dining\s+)?chairs?/
       : new RegExp(`(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)\\s*${key}s?`);
     const m = t.match(rx);
-    if (m) items.push({ type: key, count: numFromText(m[1]) });
-    else if (new RegExp(`\\b${key}s?\\b`).test(t)) items.push({ type: key, count: 1 });
+    if (m) {
+      items.push({ type: key, count: numFromText(m[1]) });
+    } else if (new RegExp(`\\b${key}s?\\b`).test(t)) {
+      items.push({ type: key, count: 1 });
+    }
   }
 
   return items.length ? priceUphFromItems(items) : { total:0, breakdown:[], items:[] };
 }
 
-/* ========================= Summary helpers ========================= */
+/* ========================= Booking summary builder ========================= */
+function bookingSummary(state) {
+  const parts = [];
+  if (state.carpet)     parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
+  if (state.upholstery) parts.push(`Upholstery — ${state.upholstery.breakdown?.join(", ") || ""} — $${state.upholstery.total}`);
+  if (state.duct)       parts.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`);
+
+  const total =
+    (state.carpet?.price || 0) +
+    (state.upholstery?.total || 0) +
+    (state.duct?.total || 0);
+
+  return `**Booking summary**
+${parts.join("\n")}
+**Total:** $${total}
+
+**Name:** ${state.name || "-"}
+**Phone:** ${state.phone ? formatPhone(state.phone) : "-"}
+**Email:** ${state.email || "-"}
+**Address:** ${state.address || "-"}
+**Preferred Day:** ${state.date || "-"}
+**Arrival Time:** ${state.window || "-"}
+**Pets:** ${state.pets || "-"}   **Outdoor Water:** ${state.outdoorWater || "-"}
+**Building:** ${state.building || "-"}${state.floor?` (Floor ${state.floor})`:""}
+**Notes:** ${state.notes || "-"}
+
+If you would like to make any changes to your work order, please give the dispatcher a call at (678) 929-8202.`;
+}
+
+/* === Helpers to build Chatbase-style Zap payloads (form-encoded) === */
 function buildCleaningBreakdownForZap(state){
   const lines = [];
-  if (state.carpet)     lines.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
+  if (state.carpet) lines.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
   if (state.upholstery) lines.push(`Upholstery — ${state.upholstery.breakdown?.join(", ") || ""} — $${state.upholstery.total}`);
-  if (state.duct)       lines.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`);
+  if (state.duct) lines.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`);
   return lines.join("\n");
 }
 function selectedServiceForZap(state){
@@ -393,6 +347,9 @@ function selectedServiceForZap(state){
 function totalPriceForZap(state){
   return (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
 }
+function encodeForm(data){
+  return Object.keys(data).map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? "")).join("&");
+}
 function snapshotForSession(state){
   const parts = [];
   if (state.carpet) parts.push(`Carpet: ${state.carpet.billable} areas (${state.carpet.describedText})`);
@@ -402,7 +359,7 @@ function snapshotForSession(state){
   return parts.length ? `Snapshot: ${parts.join(" | ")} | Total so far: $${total}` : "";
 }
 
-/* ========================= Follow-up helpers ========================= */
+/* ========================= Follow-up flags ========================= */
 function armFollowUp(state, minutes=10) {
   const ms = Math.max(5, minutes) * 60 * 1000;
   state._followUpArmed = true;
@@ -412,12 +369,15 @@ function disarmFollowUp(state) {
   state._followUpArmed = false;
   state._followUpDueAt = 0;
 }
+
+/* ========= Session trigger helpers ========= */
 function hasContact(state){ 
   return !!(state.name && state.phone && /^\d{10}$/.test(state.phone)); 
 }
+
 async function sendSessionIfEligible(state, reason){
   if (!hasContact(state)) return;
-  if (state._sessionSent) return;
+  if (state._sessionSent) return; // debounce so it only fires once
   const payload = {
     Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
     "selected service": selectedServiceForZap(state),
@@ -442,104 +402,11 @@ async function sendSessionIfEligible(state, reason){
     console.error("Session Zap failed", e); 
   }
 }
+
 function refreshFollowUpIfEligible(state){
   if (hasContact(state) && state.step !== "collect_notes") {
-    armFollowUp(state, 10);
+    armFollowUp(state, 10); // set to 1 for faster SMS testing
   }
-}
-
-/* ========================= Zap senders (booking + session) ========================= */
-async function sendBookingZapFormEncoded(payload){
-  try {
-    await fetch(ZAPIER_BOOKING_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: encodeForm(payload)
-    });
-  } catch (err) {
-    console.error("Booking Zap failed", err);
-  }
-}
-async function sendSessionZapFormEncoded(payload){
-  try {
-    if (!payload.name2025 && !payload.phone2025 && !payload.email2025) {
-      console.warn("SESSION send skipped: no minimally-identifying fields in payload");
-      return;
-    }
-    if (!ZAPIER_SESSION_URL) { 
-      console.warn("SESSION URL missing (env ZAP_SESSION_URL). Skipping partial send."); 
-      return; 
-    }
-    if (ZAPIER_SESSION_URL === ZAPIER_TURNLOG_URL) { 
-      console.warn("SESSION URL equals TURN LOG URL — blocked to prevent collision."); 
-      return; 
-    }
-    const resp = await fetch(ZAPIER_SESSION_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: encodeForm(payload)
-    });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(()=>"(no body)");
-      console.error("Session Zap non-200", resp.status, txt);
-    }
-  } catch (err) {
-    console.error("Session Zap failed", err);
-  }
-}
-
-/* ========================= Reuse prompts (Zap-friendly fields) ========================= */
-const displayAddress = s => s.Address || s.address || '';
-const displayName    = s => s.name2025 || s.name || '';
-const displayEmail   = s => s.email2025 || s.email || '';
-const displayPhone   = s => normalizeDigits(s.phone2025 || s.phone || '');
-
-/* ---------- Prompts ---------- */
-function promptAddress(state) {
-  const addr = displayAddress(state);
-  if (addr) {
-    state.step = "confirm_reuse_address";
-    return { reply: `Use this service address?\n${addr}`, quickReplies: ["Yes","No"], state };
-  }
-  state.step = "collect_address";
-  return { reply: `What’s the full service address? (street + city + state + ZIP — commas optional)`, state };
-}
-function promptName(state) {
-  const name = displayName(state);
-  if (name) {
-    state.step = "confirm_reuse_name";
-    return { reply: `Use this name? ${name}`, quickReplies: ["Yes","No"], state };
-  }
-  state.step = "collect_name";
-  return { reply: `What’s your full name? (First and last name)`, state };
-}
-function promptPhone(state) {
-  const digits = displayPhone(state);
-  if (digits && /^\d{10}$/.test(digits)) {
-    state.step = "confirm_reuse_phone";
-    return { reply: `Use this phone number? ${formatPhone(digits)}`, quickReplies: ["Yes","No"], state };
-  }
-  state.step = "collect_phone";
-  return { reply: `What’s the best phone number to reach you?`, state };
-}
-function promptEmail(state) {
-  const email = displayEmail(state);
-  if (email) {
-    state.step = "confirm_reuse_email";
-    return { reply: `Use this email? ${email}`, quickReplies: ["Yes","No"], state };
-  }
-  state.step = "collect_email";
-  return { reply: `What’s your email address?`, state };
-}
-/* ========================= Intro ========================= */
-function intro() {
-  const hour = new Date().getHours();
-  const hello = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-  return {
-    reply: `${hello}! Are you looking for carpet cleaning, upholstery cleaning, or air duct cleaning service?`,
-    quickReplies: SERVICE_CHOICES,
-    state: { step: "choose_service", faqLog: [] }
-  };
 }
 
 /* ========================= Smart corrections ========================= */
@@ -598,7 +465,7 @@ function applySmartCorrections(user, state) {
     };
   }
 
-  // dynamic carpet tweaks (only if we already priced carpet)
+  // dynamic carpet tweaks
   if (state.carpet && state.carpet.detail) {
     const d = { rooms:0, halls:0, stairs:0, extras:0, rugs:0, ...state.carpet.detail };
     let changed = false;
@@ -653,6 +520,68 @@ function applySmartCorrections(user, state) {
 
   return null;
 }
+/* ========================= Reuse prompts (UPDATED for Zap + 2025 fields) ========================= */
+const normalizeDigits = (s='') => String(s).replace(/\D+/g,'');
+const formatPhone = digits => (digits && digits.length===10)
+  ? `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`
+  : digits;
+
+const displayAddress = s => s.Address || s.address || '';
+const displayName    = s => s.name2025 || s.name || '';
+const displayEmail   = s => s.email2025 || s.email || '';
+const displayPhone   = s => normalizeDigits(s.phone2025 || s.phone || '');
+
+/* ---------- Prompts ---------- */
+function promptAddress(state) {
+  const addr = displayAddress(state);
+  if (addr) {
+    state.step = "confirm_reuse_address";
+    return { reply: `Use this service address?\n${addr}`, quickReplies: ["Yes","No"], state };
+  }
+  state.step = "collect_address";
+  return { reply: `What’s the full service address? (street + city + state + ZIP — commas optional)`, state };
+}
+
+function promptName(state) {
+  const name = displayName(state);
+  if (name) {
+    state.step = "confirm_reuse_name";
+    return { reply: `Use this name? ${name}`, quickReplies: ["Yes","No"], state };
+  }
+  state.step = "collect_name";
+  return { reply: `What’s your full name? (First and last name)`, state };
+}
+
+function promptPhone(state) {
+  const digits = displayPhone(state);
+  if (digits && /^\d{10}$/.test(digits)) {
+    state.step = "confirm_reuse_phone";
+    return { reply: `Use this phone number? ${formatPhone(digits)}`, quickReplies: ["Yes","No"], state };
+  }
+  state.step = "collect_phone";
+  return { reply: `What’s the best phone number to reach you?`, state };
+}
+
+function promptEmail(state) {
+  const email = displayEmail(state);
+  if (email) {
+    state.step = "confirm_reuse_email";
+    return { reply: `Use this email? ${email}`, quickReplies: ["Yes","No"], state };
+  }
+  state.step = "collect_email";
+  return { reply: `What’s your email address?`, state };
+}
+
+/* ========================= Intro ========================= */
+function intro() {
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  return {
+    reply: `${hello}! Are you looking for carpet cleaning, upholstery cleaning, or air duct cleaning service?`,
+    quickReplies: SERVICE_CHOICES,
+    state: { step: "choose_service", faqLog: [] }
+  };
+}
 
 /* ========================= API Handler ========================= */
 module.exports = async (req, res) => {
@@ -664,50 +593,13 @@ module.exports = async (req, res) => {
     const msg    = user.toLowerCase();
     let state    = body.state || {};
     if (!Array.isArray(state.faqLog)) state.faqLog = [];
-    initSessionState(state);
 
-    // Wrap response to collect transcript (NO zap here)
-    const stepBefore = state.step || "choose_service";
-    const origStatus = res.status.bind(res);
-    res.status = (code) => {
-      const r = origStatus(code);
-      const origJson = r.json.bind(r);
-      r.json = (out) => {
-        try {
-          const st = (out && out.state) ? out.state : state || {};
-          appendTurn(st, {
-            user: user || (body.init ? "INIT" : ""),
-            bot: out && out.reply ? out.reply : "",
-            stepBefore,
-            stepAfter: (st && st.step) || "",
-            quickReplies: out && out.quickReplies,
-            intentHandled: out && out.intentHandled,
-            error: out && out.error
-          });
-          // ensure state with appended _turns is returned to client
-          if (out && out.state) out.state = st; else out = { ...(out||{}), state: st };
-        } catch (e) {
-          console.error("Transcript append failed", e);
-        }
-        return origJson(out);
-      };
-      return r;
-    };
-
-    // Follow-up timeout: send partial + finalize turn log on next user ping after due
+    // Timeout follow-up check (legacy session arm/disarm pattern)
     if (state._followUpArmed && state._followUpDueAt && Date.now() >= state._followUpDueAt && state.step !== "collect_notes") {
       await sendSessionIfEligible(state, "timeout");
-      await sendFinalTurnLogOnce(state, "timeout");
       disarmFollowUp(state);
     }
 
-    // Allow client to explicitly finalize (optional)
-    if (body.finalize === true) {
-      await sendFinalTurnLogOnce(state, "client_finalize");
-      return res.status(200).json({ reply: "Session archived. How else can I help?", quickReplies: SERVICE_CHOICES, state: { step:"choose_service", faqLog: state.faqLog } });
-    }
-
-    // First load
     if (body.init) return res.status(200).json(intro());
 
     // Smart corrections FIRST
@@ -727,13 +619,27 @@ module.exports = async (req, res) => {
       if (ans) { logFAQ(state, incomingQuestion, ans); return res.status(200).json({ reply: ans, state, intentHandled: "faq" }); }
     }
 
-    // Helper for combined summary
+    /* ---------------- Router ---------------- */
     function preBookingSummary(state) {
       const parts = [];
-      if (state.carpet)     parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
-      if (state.upholstery) parts.push(`Upholstery — ${state.upholstery.breakdown?.length ? state.upholstery.breakdown.join(", ") : "selected items"} — $${state.upholstery.total}`);
-      if (state.duct)       parts.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`);
-      const total = (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
+      if (state.carpet) {
+        parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
+      }
+      if (state.upholstery) {
+        const uphText = state.upholstery.breakdown?.length ? state.upholstery.breakdown.join(", ") : "selected items";
+        parts.push(`Upholstery — ${uphText} — $${state.upholstery.total}`);
+      }
+      if (state.duct) {
+        parts.push(
+          `Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}` +
+          `${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`
+        );
+      }
+      const total =
+        (state.carpet?.price || 0) +
+        (state.upholstery?.total || 0) +
+        (state.duct?.total || 0);
+
       return `**Quick summary so far**
 ${parts.join("\n")}
 **Combined total:** $${total}
@@ -741,7 +647,7 @@ ${parts.join("\n")}
 Proceed with booking?`;
     }
 
-    switch (state.step || "choose_service") {
+    switch (state.step) {
       /* ========== Choose service ========== */
       case "choose_service": {
         let choice = null;
@@ -756,11 +662,11 @@ Proceed with booking?`;
         }
         if (choice === "carpet") {
           state.step = "carpet_details";
-          return res.status(200).json({ reply: `What areas would you like us to clean? (e.g., “3 rooms, hallway, 2 rugs, stairs”)`, state });
+          return res.status(200).json({ reply: `What areas would you like us to clean for your carpet cleaning service? (For example: “3 rooms, hallway, 2 rugs, stairs”).`, state });
         }
         if (choice === "upholstery") {
           state.step = "upholstery_details";
-          return res.status(200).json({ reply: `What upholstery pieces would you like cleaned? (sectional, sofa, loveseat, recliner, ottoman, dining chairs, mattress)`, quickReplies: UPH_CHOICES, state });
+          return res.status(200).json({ reply: `What upholstery pieces would you like cleaned? (e.g., sectional, sofa, loveseat, recliner, ottoman, dining chairs, mattress)`, quickReplies: UPH_CHOICES, state });
         }
         state.step = "duct_package";
         return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic","Deep"], state });
@@ -788,7 +694,6 @@ Proceed with booking?`;
         }
         if (/no|not now|skip/i.test(msg)) {
           await sendSessionIfEligible(state, "user opted out before notes");
-          await sendFinalTurnLogOnce(state, "opt_out_before_booking");
           state = { step: "choose_service", faqLog: state.faqLog };
           return res.status(200).json({
             reply: `All good – if you’d like a quote later just say “carpet”, “upholstery”, or “ducts”.`,
@@ -921,7 +826,7 @@ Proceed with booking?`;
         }
         state.step = "carpet_upsell_offer";
         return res.status(200).json({
-          reply: `Since you’re booking upholstery, you qualify for a **free hallway** at 4+ areas, and at **6+** you also get **one room free**. Want me to price carpet too?`,
+          reply: `Since you’re booking upholstery, you qualify for a **free hallway** if you clean 4+ areas, and at **6+ areas** you also get **one room free**. Want me to price carpet too?`,
           quickReplies: ["Yes, add carpet", "No, skip"],
           state
         });
@@ -973,7 +878,6 @@ Proceed with booking?`;
       /* ========== Duct flow ========== */
       case "duct_package": {
         if (!/basic|deep/.test(msg)) {
-          state.step = "duct_package";
           return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic","Deep"], state });
         }
         state.duct = { pkg: /deep/.test(msg) ? "Deep" : "Basic", systems: 1, add: { furnace:false, dryer:false } };
@@ -1000,19 +904,23 @@ Proceed with booking?`;
       case "duct_add_furnace": {
         state.duct.add.furnace = /add/.test(msg);
         state.step = "duct_add_dryer";
-        return res.status(200).json({ reply: dryerVentCopy, quickReplies: ["Add dryer vent","No add-ons"], state });
+        return res.status(200).json({
+          reply: dryerVentCopy,
+          quickReplies: ["Add dryer vent", "No add-ons"],
+          state
+        });
       }
 
       case "duct_add_dryer": {
         state.duct.add.dryer = /add/.test(msg);
         const base = state.duct.pkg === "Deep" ? 500 : 200;
         let total = state.duct.systems * base;
-        if (state.duct.add.furnace) total += state.duct.systems * (state.duct.pkg === "Deep" ? 100 : 200);
+        if (state.duct.add.furnace) total += state.duct.systems * (state.duct?.pkg === "Deep" ? 100 : 200);
         if (state.duct.add.dryer)   total += 200;
         state.duct.total = total;
 
         state.step = "duct_confirm";
-        return res.status(200).json({ reply: `Your **${state.duct.pkg}** duct cleaning total is **$${total}** (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add.furnace?`, +furnace`:""}${state.duct.add.dryer?`, +dryer vent`:""}). Proceed?`, quickReplies: ["Proceed","Change","Skip"], state });
+        return res.status(200).json({ reply: `Your **${state.duct.pkg}** duct cleaning total is **$${total}** (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add.furnace?`, +furnace`:""}${state.duct.add.dryer?`, +dryer vent`:""}). Proceed?`, quickReplies: ["Proceed", "Change", "Skip"], state });
       }
 
       case "duct_confirm": {
@@ -1021,30 +929,25 @@ Proceed with booking?`;
         return res.status(200).json(promptAddress(state));
       }
 
-      /* ========== Address → Name → Phone → Email → Date → Window → Pets → Water → Building → Floor → Notes ========== */
+      /* ========== Address → Name → Phone → Email → Date → Details → Notes → Summary ========== */
       case "confirm_reuse_address": {
         if (/^y/i.test(msg)) return res.status(200).json(promptName(state));
-        state.address=""; state.Address=""; state.step = "collect_address";
+        state.address = ""; state.Address = ""; state.step = "collect_address";
         return res.status(200).json({ reply: `What’s the full service address? (street + city + state + ZIP — commas optional)`, state });
       }
       case "confirm_reuse_name": {
         if (/^y/i.test(msg)) return res.status(200).json(promptPhone(state));
-        state.name=""; state.name2025=""; state.step = "collect_name";
+        state.name = ""; state.name2025 = ""; state.step = "collect_name";
         return res.status(200).json({ reply: `What’s your full name? (First and last name)`, state });
       }
       case "confirm_reuse_phone": {
-        if (/^y/i.test(msg)) {
-          // If we already have name + phone (reused), emit the partial now
-          try { await sendSessionIfEligible(state, "confirm_reuse_phone"); } 
-          catch (e) { console.error("Session (confirm_reuse_phone) emit failed", e); }
-          return res.status(200).json(promptEmail(state));
-        }
-        state.phone=""; state.phone2025=""; state.step = "collect_phone";
+        if (/^y/i.test(msg)) return res.status(200).json(promptEmail(state));
+        state.phone = ""; state.phone2025 = ""; state.step = "collect_phone";
         return res.status(200).json({ reply: `What’s the best phone number to reach you?`, state });
       }
       case "confirm_reuse_email": {
         if (/^y/i.test(msg)) { state.step="collect_date"; refreshFollowUpIfEligible(state); return res.status(200).json({ reply:`What day would you like the cleaning? (e.g., July 10 or 07/10)`, state }); }
-        state.email=""; state.email2025=""; state.step = "collect_email";
+        state.email = ""; state.email2025 = ""; state.step = "collect_email";
         return res.status(200).json({ reply: `What’s your email address?`, state });
       }
 
@@ -1053,9 +956,16 @@ Proceed with booking?`;
           const a = answerFAQ(user);
           if (a) {
             logFAQ(state, user, a);
-            return res.status(200).json({ reply: a + `\n\nWhat’s the full service address? (street + city + state + ZIP — commas optional)`, state, intentHandled:"faq" });
+            return res.status(200).json({
+              reply: a + `\n\nWhat’s the full service address? (street + city + state + ZIP — commas optional)`,
+              state,
+              intentHandled: "faq"
+            });
           }
-          return res.status(200).json({ reply: `I can help with that, but first I need your address. What’s the full service address? (street + city + state + ZIP — commas optional)`, state });
+          return res.status(200).json({
+            reply: `I can help with that, but first I need your address. What’s the full service address? (street + city + state + ZIP — commas optional)`,
+            state
+          });
         }
 
         const zipMatch = user.match(/\b(\d{5})(?:-\d{4})?\b/);
@@ -1063,7 +973,10 @@ Proceed with booking?`;
         const hasState = /\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b/i.test(user);
 
         if (!zipMatch || !hasStreet || !hasState) {
-          return res.status(200).json({ reply: `Please provide your **full service address** (street + city + state + ZIP). Commas are optional.\nExample: "2314 College St Atlanta GA 30307"`, state });
+          return res.status(200).json({
+            reply: `Please provide your **full service address** (street + city + state + ZIP). Commas are optional.\nExample: "2314 College St Atlanta GA 30307"`,
+            state
+          });
         }
 
         const zip = zipMatch[1];
@@ -1073,7 +986,10 @@ Proceed with booking?`;
           state.zip = zip;
           state.step = "ooa_collect_phone";
           return res.status(200).json({
-            reply: `Thanks! Unfortunately, that address looks **outside our service area**.\nWe can have a team member call to see if we can make it work.\n\nWhat’s the best **phone number** to reach you?`,
+            reply:
+              `Thanks! Unfortunately, that address looks **outside our service area**.\n` +
+              `We can have a team member call to see if we can make it work.\n\n` +
+              `What’s the best **phone number** to reach you?`,
             state
           });
         }
@@ -1098,8 +1014,17 @@ Proceed with booking?`;
         state.name = user.trim();
         const handoffMsg = `Thanks, ${state.name}! We’ll review your address (${state.address}) and call ${formatPhone(state.phone)} to see if we can service your area.`;
 
-        await sendSessionIfEligible(state, "OOA handoff");
-        await sendFinalTurnLogOnce(state, "OOA_handoff");
+        await sendSessionZapFormEncoded({
+          Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
+          "selected service": selectedServiceForZap(state),
+          "Total Price": totalPriceForZap(state),
+          name2025: state.name || "",
+          phone2025: state.phone || "",
+          email2025: state.email || "",
+          Address: state.address || "",
+          booking_complete: false,
+          conversation: snapshotForSession(state) || "OOA handoff"
+        });
 
         state = { step: "choose_service", faqLog: [] };
         return res.status(200).json({ reply: handoffMsg, quickReplies: SERVICE_CHOICES, state });
@@ -1118,11 +1043,11 @@ Proceed with booking?`;
         if (digits.length !== 10) return res.status(200).json({ reply:`Please enter a valid **10-digit** phone number.`, state });
         state.phone = digits;
 
-        // Fire Partial/Session once (name + phone captured)
+        // >>> fire Session/Partial once, at "got phone"
         try { await sendSessionIfEligible(state, "got phone"); }
         catch (e) { console.error("Session (got phone) emit failed", e); }
 
-        refreshFollowUpIfEligible(state);
+        refreshFollowUpIfEligible(state); // start follow-up window once we have name+phone
         return res.status(200).json(promptEmail(state));
       }
 
@@ -1204,7 +1129,6 @@ Proceed with booking?`;
         if (fl > 3) {
           state.step = "end_for_rep";
           await sendSessionIfEligible(state, "building above 3rd floor");
-          await sendFinalTurnLogOnce(state, "building_above_3rd_floor");
           disarmFollowUp(state);
           return res.status(200).json({ reply: `Since it’s above the 3rd floor, a sales rep will contact you to confirm if service is possible.`, state });
         }
@@ -1246,31 +1170,7 @@ Proceed with booking?`;
         };
         try { await sendBookingZapFormEncoded(bookingPayload); } catch (err) { console.error("Booking Zap failed", err); }
 
-        // Fire one-time final Turn Log here (booking path)
-        await sendFinalTurnLogOnce(state, "booking_complete");
-
-        const parts = [];
-        if (state.carpet)     parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
-        if (state.upholstery) parts.push(`Upholstery — ${state.upholstery.breakdown?.join(", ") || ""} — $${state.upholstery.total}`);
-        if (state.duct)       parts.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems>1?"s":""}${state.duct.add?.furnace?`, +furnace`:""}${state.duct.add?.dryer?`, +dryer vent`:""}) — $${state.duct.total}`);
-        const total = (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
-        const summary =
-`**Booking summary**
-${parts.join("\n")}
-**Total:** $${total}
-
-**Name:** ${state.name || "-"}
-**Phone:** ${state.phone ? formatPhone(state.phone) : "-"}
-**Email:** ${state.email || "-"}
-**Address:** ${state.address || "-"}
-**Preferred Day:** ${state.date || "-"}
-**Arrival Time:** ${state.window || "-"}
-**Pets:** ${state.pets || "-"}   **Outdoor Water:** ${state.outdoorWater || "-"}
-**Building:** ${state.building || "-"}${state.floor?` (Floor ${state.floor})`:""}
-**Notes:** ${state.notes || "-"}
-
-If you would like to make any changes to your work order, please give the dispatcher a call at (678) 929-8202.`;
-
+        const summary = bookingSummary(state);
         state.step = "post_summary_offer";
 
         return res.status(200).json({
@@ -1284,13 +1184,12 @@ If you would like to make any changes to your work order, please give the dispat
 
       case "post_summary_offer": {
         if (/no|thanks/i.test(msg)) {
-          // no second final log; it already fired at booking_complete
           state = { step:"choose_service", faqLog: state.faqLog };
           return res.status(200).json({ reply:`Got it! If you need anything else, just say “carpet”, “upholstery”, or “ducts”.`, quickReplies: SERVICE_CHOICES, state });
         }
         if (state.duct) {
           if (/carpet/i.test(msg)) { state.step="carpet_details"; return res.status(200).json({ reply:`Great — tell me the carpet areas (e.g., “4 rooms, hallway, 1 rug”).`, state }); }
-          if (/uphol/i.test(msg))  { state.step="upholstery_details"; return res.status(200).json({ reply:`Great — what upholstery pieces should we add?`, quickReplies: UPH_CHOICES, state }); }
+          if (/uphol/i.test(msg)) { state.step="upholstery_details"; return res.status(200).json({ reply:`Great — what upholstery pieces should we add?`, quickReplies: UPH_CHOICES, state }); }
         } else {
           if (/duct|tell me/i.test(msg)) { state.step="duct_package"; return res.status(200).json({ reply: ductIntroCopy(), quickReplies:["Basic","Deep"], state }); }
         }
@@ -1305,11 +1204,42 @@ If you would like to make any changes to your work order, please give the dispat
     }
   } catch (err) {
     console.error("chat.js error", err);
-    const out = {
+    return res.status(200).json({
       reply: `Sorry — something glitched on my end, but I’m still here. Tell me “carpet”, “upholstery”, or “ducts” and I’ll price it.`,
       state: { step: "choose_service", faqLog: [] },
       error: String(err && err.message || err)
-    };
-    return res.status(200).json(out);
+    });
   }
 };
+/* ========================= ZAP HANDLERS (form-encoded) ========================= */
+const fetch = global.fetch || require("node-fetch");
+
+// Your two Zap Webhooks:
+const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/"; // Booking Zap
+const ZAPIER_SESSION_URL = "https://hooks.zapier.com/hooks/catch/3165661/u12ap8l/"; // Session/Partial Zap
+
+async function sendBookingZapFormEncoded(payload){
+  try {
+    await fetch(ZAPIER_BOOKING_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: encodeForm(payload)
+    });
+  } catch (err) {
+    console.error("Booking Zap failed", err);
+  }
+}
+
+async function sendSessionZapFormEncoded(payload){
+  try {
+    // Only send if some contact info (guard stays)
+    if (!payload.name2025 && !payload.phone2025 && !payload.email2025) return;
+    await fetch(ZAPIER_SESSION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: encodeForm(payload)
+    });
+  } catch (err) {
+    console.error("Session Zap failed", err);
+  }
+}
