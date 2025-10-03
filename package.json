@@ -1,0 +1,14 @@
+{
+  "name": "switchboard-chatbot-deploy",
+  "version": "1.0.0",
+  "description": "GPT chatbot for carpet, upholstery, and duct booking",
+  "scripts": {
+    "start": "node api/chat.js"
+  },
+  "dependencies": {
+    "openai": "^4.26.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

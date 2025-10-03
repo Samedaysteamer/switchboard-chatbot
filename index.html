@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Same Day Steamerz Chatbot</title>
+    <!-- NOTE: load from project root, not /css -->
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="chat-container">
+      <div class="chat-header">
+        <span class="avatar"></span>
+        <div>
+          <div class="title">Same Day Steamerz</div>
+          <div class="sub">Live Assistant</div>
+        </div>
+      </div>
+
+      <!-- Messages go here -->
+      <div id="chat-box"></div>
+
+      <!-- Quick replies get appended under chat-box -->
+      <div id="quick-replies"></div>
+
+      <form id="chat-form" class="chat-input">
+        <input
+          id="user-input"
+          type="text"
+          placeholder="Type your message…"
+          autocomplete="off"
+          required
+        />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+
+    <!-- NOTE: load from project root, not /js -->
+    <script src="script.js" defer></script>
+  </body>
+</html>
