@@ -51,6 +51,12 @@ function encodeForm(data){
   return Object.keys(data).map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? "")).join("&");
 }
 
+// Cap long strings so Google Sheets / Zap steps don't choke
+function safeStr(v, max = 25000) {
+  const s = (v == null) ? "" : String(v);
+  return s.length > max ? s.slice(0, max) + `\n[TRUNCATED ${s.length - max} chars]` : s;
+}
+
 /* ====== Session transcript helpers (single final Turn Log) ====== */
 function initSessionState(state) {
   if (!state._sessionId) state._sessionId = Math.random().toString(36).slice(2);
@@ -81,7 +87,7 @@ function transcriptToText(turns=[]) {
     if (r.intent) lines.push(`I> ${r.intent}`);
     if (r.err)    lines.push(`E> ${r.err}`);
   }
-  return lines.join("\n");
+  return safeStr(lines.join("\n"));
 }
 async function sendTurnLog(payload){
   try {
@@ -101,18 +107,33 @@ async function sendFinalTurnLogOnce(state, reason) {
     state._turnLogSent = true;
 
     const payload = {
+      // routing / audit
+      variant: process.env.BOT_VARIANT || "",
       session_id: state._sessionId || "",
       session_started_at: state._sessionStart || "",
       session_ended_at: new Date().toISOString(),
       reason: reason || "",
+
+      // contact + job context
       name: displayName(state),
       phone: displayPhone(state),
       email: displayEmail(state),
       address: displayAddress(state),
       zip: state.zip || "",
+      date: state.date || "",
+      window: state.window || "",
+      pets: state.pets || "",
+      outdoor_water: state.outdoorWater || "",
+      building: state.building || "",
+      floor: state.floor || "",
+
+      // services + pricing
       services: selectedServiceForZap(state),
       cleaning_breakdown: buildCleaningBreakdownForZap(state),
       total_price: totalPriceForZap(state),
+
+      // compact + full logs
+      snapshot: safeStr(snapshotForSession(state), 2000),
       faq_count: Array.isArray(state.faqLog) ? state.faqLog.length : 0,
       transcript: transcriptToText(state._turns || [])
     };
@@ -441,14 +462,27 @@ async function sendBookingZapFormEncoded(payload){
 }
 async function sendSessionZapFormEncoded(payload){
   try {
-    if (!payload.name2025 && !payload.phone2025 && !payload.email2025) return;
-    if (!ZAPIER_SESSION_URL) { console.warn("SESSION URL missing (ZAP_SESSION_URL). Skipping partial send."); return; }
-    if (ZAPIER_SESSION_URL === ZAPIER_TURNLOG_URL) { console.warn("SESSION URL equals TURN LOG URL — blocked to prevent collision."); return; }
-    await fetch(ZAPIER_SESSION_URL, {
+    if (!payload.name2025 && !payload.phone2025 && !payload.email2025) {
+      console.warn("SESSION send skipped: no minimally-identifying fields in payload");
+      return;
+    }
+    if (!ZAPIER_SESSION_URL) { 
+      console.warn("SESSION URL missing (env ZAP_SESSION_URL). Skipping partial send."); 
+      return; 
+    }
+    if (ZAPIER_SESSION_URL === ZAPIER_TURNLOG_URL) { 
+      console.warn("SESSION URL equals TURN LOG URL — blocked to prevent collision."); 
+      return; 
+    }
+    const resp = await fetch(ZAPIER_SESSION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body: encodeForm(payload)
     });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>"(no body)");
+      console.error("Session Zap non-200", resp.status, txt);
+    }
   } catch (err) {
     console.error("Session Zap failed", err);
   }
@@ -497,7 +531,6 @@ function promptEmail(state) {
   state.step = "collect_email";
   return { reply: `What’s your email address?`, state };
 }
-
 /* ========================= Intro ========================= */
 function intro() {
   const hour = new Date().getHours();
@@ -620,6 +653,7 @@ function applySmartCorrections(user, state) {
 
   return null;
 }
+
 /* ========================= API Handler ========================= */
 module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -999,7 +1033,12 @@ Proceed with booking?`;
         return res.status(200).json({ reply: `What’s your full name? (First and last name)`, state });
       }
       case "confirm_reuse_phone": {
-        if (/^y/i.test(msg)) return res.status(200).json(promptEmail(state));
+        if (/^y/i.test(msg)) {
+          // If we already have name + phone (reused), emit the partial now
+          try { await sendSessionIfEligible(state, "confirm_reuse_phone"); } 
+          catch (e) { console.error("Session (confirm_reuse_phone) emit failed", e); }
+          return res.status(200).json(promptEmail(state));
+        }
         state.phone=""; state.phone2025=""; state.step = "collect_phone";
         return res.status(200).json({ reply: `What’s the best phone number to reach you?`, state });
       }
