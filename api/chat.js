@@ -163,11 +163,13 @@ function detectQuickIntents(text="") {
   };
 }
 
+// COPY UPDATED to reflect $100 minimum and the 2R + hallway promo
 const stanleyRebuttal = () =>
 `We’re **Same Day Steamerz** — locally owned with **truck-mounted hot water extraction (~240°F)** and we stand behind every job.
 
 **Why people switch from “big brands”:**
-• **Straightforward pricing:** **$50 per area, 3-area minimum ($150).**  
+• **Straightforward pricing:** **$50 per area, $100 minimum.**  
+• **Promo:** **2 rooms + 1 hallway = $100**.  
 • **Extra value built in:**  
   – **4+ total areas:** your **first hallway is free**.  
   – **6+ total areas:** **one room free** **+** a **hallway free**.  
@@ -177,7 +179,8 @@ const stanleyRebuttal = () =>
 Want me to price your home now?`;
 
 const specialCopy = () =>
-`Our **$50 special** is **$50 per area** with a **3-area minimum ($150)**.
+`Our **$50 special** is **$50 per area** with a **$100 minimum**.
+**Promo:** **2 rooms + 1 hallway = $100**.
 
 **Freebies built in**  
 • **4+ total areas:** your **first hallway is free**.  
@@ -239,6 +242,7 @@ function logFAQ(state, q, a) {
 }
 
 /* ========================= Pricing (Carpet) ========================= */
+// ⬇️ UPDATED: $100 minimum; and EXACT 2 rooms + 1 hallway bundle = $100
 function computeCarpetTotals(detail) {
   const d = { rooms:0, halls:0, stairs:0, extras:0, rugs:0, ...detail };
   const totalAreasBeforeFreebie = d.rooms + d.halls + d.stairs + d.extras + d.rugs;
@@ -247,7 +251,13 @@ function computeCarpetTotals(detail) {
   const chargeableRooms = Math.max(0, d.rooms - freeRoom);
   const chargeableHalls = Math.max(0, d.halls - freeHall);
   const billable = chargeableRooms + chargeableHalls + d.stairs + d.extras + d.rugs;
-  const price = Math.max(150, billable * 50);
+  let price = Math.max(100, billable * 50);
+
+  // Promo override: exactly 2 rooms + 1 hallway, nothing else => $100
+  if (d.rooms === 2 && d.halls === 1 && d.stairs === 0 && d.extras === 0 && d.rugs === 0) {
+    price = 100;
+  }
+
   const parts = [];
   if (d.rooms)  parts.push(`${d.rooms} room${d.rooms>1?"s":""}${freeRoom ? " (1 free)" : ""}`);
   if (d.halls)  parts.push(`${d.halls} hallway${d.halls>1?"s":""}${freeHall ? " (1 free)" : ""}`);
@@ -610,7 +620,6 @@ function applySmartCorrections(user, state) {
 
   return null;
 }
-
 /* ========================= API Handler ========================= */
 module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
