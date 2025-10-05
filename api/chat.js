@@ -583,16 +583,80 @@ function intro() {
   };
 }
 
+/* ========== ManyChat v2 formatter (NEW) ========== */
+function toManyChatV2(payload) {
+  // If already v2 or invalid, just return as-is
+  if (payload && payload.version === "v2") return payload;
+
+  // Normalize text
+  const texts = [];
+  if (typeof payload === "string") {
+    texts.push(payload);
+  } else if (payload && typeof payload.reply === "string") {
+    texts.push(payload.reply);
+  } else if (payload && typeof payload.text === "string") {
+    texts.push(payload.text);
+  }
+
+  // Normalize quick replies
+  let qrs = [];
+  if (payload && Array.isArray(payload.quickReplies)) {
+    qrs = payload.quickReplies
+      .map(q => {
+        if (typeof q === "string") return { type: "text", title: q, payload: q.toLowerCase() };
+        if (q && typeof q === "object") {
+          const title = q.title || q.text || String(q.label || "");
+          const pl = q.payload || (title ? title.toLowerCase() : "");
+          return { type: "text", title, payload: pl };
+        }
+        return null;
+      })
+      .filter(Boolean);
+  }
+
+  const messages = (texts.length ? texts : [""]).map(t => ({ type: "text", text: t }));
+
+  const out = { version: "v2", content: { messages } };
+  if (qrs.length) out.content.quick_replies = qrs;
+
+  // pass through state (so you can map it to a ManyChat custom field if desired)
+  if (payload && payload.state != null) out.state = payload.state;
+  if (payload && payload.error != null) out.error = payload.error;
+  if (payload && payload.intentHandled) out.intentHandled = payload.intentHandled;
+
+  return out;
+}
 /* ========================= API Handler ========================= */
 module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
     const body   = req.body || {};
-    const user   = (body.message || "").trim();
-    const msg    = user.toLowerCase();
-    let state    = body.state || {};
+
+    // ✅ Accept both web (`message`) and ManyChat (`text`) inputs
+    const userRaw = (body.text ?? body.message ?? "").toString();
+    const user    = userRaw.trim();
+    const msg     = user.toLowerCase();
+
+    // ✅ Accept state as object or JSON string
+    let state = body.state || {};
+    if (typeof state === "string") {
+      try { state = JSON.parse(state); } catch { state = {}; }
+    }
     if (!Array.isArray(state.faqLog)) state.faqLog = [];
+
+    // ✅ Auto-wrap responses in ManyChat v2 if coming from Messenger/ManyChat
+    const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
+    const originalJson = res.json.bind(res);
+    res.json = (data) => {
+      try {
+        if (fromManyChat) return originalJson(toManyChatV2(data));
+        return originalJson(data);
+      } catch (e) {
+        // In case of any formatting error, send original payload
+        return originalJson(data);
+      }
+    };
 
     // Timeout follow-up check (legacy session arm/disarm pattern)
     if (state._followUpArmed && state._followUpDueAt && Date.now() >= state._followUpDueAt && state.step !== "collect_notes") {
