@@ -1,10 +1,10 @@
 // Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
-// - Adds `state_json` (string) for reliable ManyChat mapping ($.state_json -> sds_state Text field)
-// - Adds `reply_text` (string) for optional rendering via a Send Message block
-// - Fallback: if user typed but state.step missing, auto-enter choose_service to prevent intro loop
+// - Always includes `state` (object) AND `state_json` (string) for ManyChat mapping
+// - Adds `reply_text` (string) so you can map the next prompt into a text block
 // - Safe input extraction + ManyChat v2 auto-wrapper (Messenger)
+// - Fallback: if user typed but state.step missing, jump to choose_service
 
- /* ========================= Utilities ========================= */
+/* ========================= Utilities ========================= */
 const SMALL = {
   zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
@@ -542,6 +542,7 @@ function toManyChatV2(payload) {
   } else if (payload && typeof payload.text === "string") {
     texts.push(payload.text);
   }
+
   let qrs = [];
   if (payload && Array.isArray(payload.quickReplies)) {
     qrs = payload.quickReplies
@@ -561,11 +562,11 @@ function toManyChatV2(payload) {
   const out = { version: "v2", content: { messages } };
   if (qrs.length) out.content.quick_replies = qrs;
 
-  // <<< IMPORTANT: include both object + JSON string for ManyChat mapping >>>
-  if (payload && payload.state != null) {
-    out.state = payload.state; // object (for tools that accept objects)
-    try { out.state_json = JSON.stringify(payload.state); } catch { out.state_json = "{}"; }
-  }
+  // <<< IMPORTANT: always include state for ManyChat mapping >>>
+  const stateObj = (payload && payload.state !== undefined) ? payload.state : {};
+  out.state = stateObj;
+  try { out.state_json = JSON.stringify(stateObj); } catch { out.state_json = "{}"; }
+
   // export first text for optional mapping to sds_reply
   if (messages.length && messages[0]?.text) out.reply_text = messages[0].text;
 
@@ -574,8 +575,7 @@ function toManyChatV2(payload) {
 
   return out;
 }
-
-/* ========================= API Handler ========================= */
+/* ========================= API Handler (prompts + routing) ========================= */
 function repromptForStep(state = {}) {
   const s = state.step || "";
   switch (s) {
