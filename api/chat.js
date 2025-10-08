@@ -1,10 +1,10 @@
-// Same Day Steamerz — robust ManyChat + Web handler
-// - Safe input extraction (text/message/message.text)
-// - ManyChat v2 auto-wrapper only for messenger
-// - No "testing" step, no echo loops
-// - Same booking logic as your last version
+// Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
+// - Adds `state_json` (string) for reliable ManyChat mapping ($.state_json -> sds_state Text field)
+// - Adds `reply_text` (string) for optional rendering via a Send Message block
+// - Fallback: if user typed but state.step missing, auto-enter choose_service to prevent intro loop
+// - Safe input extraction + ManyChat v2 auto-wrapper (Messenger)
 
-/* ========================= Utilities ========================= */
+ /* ========================= Utilities ========================= */
 const SMALL = {
   zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
@@ -150,7 +150,6 @@ function logFAQ(state, q, a) {
 }
 
 /* ========================= Pricing (Carpet) ========================= */
-// $100 minimum; EXACT 2 rooms + 1 hallway bundle = $100
 function computeCarpetTotals(detail) {
   const d = { rooms:0, halls:0, stairs:0, extras:0, rugs:0, ...detail };
 
@@ -534,6 +533,7 @@ function intro() {
 function toManyChatV2(payload) {
   if (payload && payload.version === "v2") return payload;
 
+  // collect texts for reply_text helper
   const texts = [];
   if (typeof payload === "string") {
     texts.push(payload);
@@ -556,16 +556,25 @@ function toManyChatV2(payload) {
       })
       .filter(Boolean);
   }
+
   const messages = (texts.length ? texts : [""]).map(t => ({ type: "text", text: t }));
   const out = { version: "v2", content: { messages } };
   if (qrs.length) out.content.quick_replies = qrs;
 
-  if (payload && payload.state != null) out.state = payload.state;
+  // <<< IMPORTANT: include both object + JSON string for ManyChat mapping >>>
+  if (payload && payload.state != null) {
+    out.state = payload.state; // object (for tools that accept objects)
+    try { out.state_json = JSON.stringify(payload.state); } catch { out.state_json = "{}"; }
+  }
+  // export first text for optional mapping to sds_reply
+  if (messages.length && messages[0]?.text) out.reply_text = messages[0].text;
+
   if (payload && payload.error != null) out.error = payload.error;
   if (payload && payload.intentHandled) out.intentHandled = payload.intentHandled;
 
   return out;
 }
+
 /* ========================= API Handler ========================= */
 function repromptForStep(state = {}) {
   const s = state.step || "";
@@ -668,6 +677,11 @@ module.exports = async (req, res) => {
       disarmFollowUp(state);
     }
 
+    // If we got user text but ManyChat didn't persist state, fall into choose_service
+    if (!state.step && user) {
+      state.step = "choose_service";
+    }
+
     // If we got no user text but have a step, just re-prompt the current step
     if (!user) {
       return res.status(200).json(repromptForStep(state));
@@ -696,7 +710,7 @@ module.exports = async (req, res) => {
       if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
       if (state.upholstery) {
         const uphText = state.upholstery.breakdown?.length ? state.upholstery.breakdown.join(", ") : "selected items";
-        parts.push(`Upholstery — ${uphText} — $${state.upholstery.total}`);
+        parts.push(`Upholstery — $${state.upholstery.total} — ${uphText}`);
       }
       if (state.duct) {
         parts.push(
