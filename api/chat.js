@@ -533,7 +533,7 @@ function intro() {
 function toManyChatV2(payload) {
   if (payload && payload.version === "v2") return payload;
 
-  // collect texts for reply_text helper
+  // Gather text(s) to send
   const texts = [];
   if (typeof payload === "string") {
     texts.push(payload);
@@ -542,7 +542,9 @@ function toManyChatV2(payload) {
   } else if (payload && typeof payload.text === "string") {
     texts.push(payload.text);
   }
+  if (texts.length === 0) texts.push(""); // never send empty content array
 
+  // Quick replies
   let qrs = [];
   if (payload && Array.isArray(payload.quickReplies)) {
     qrs = payload.quickReplies
@@ -558,23 +560,23 @@ function toManyChatV2(payload) {
       .filter(Boolean);
   }
 
-  const messages = (texts.length ? texts : [""]).map(t => ({ type: "text", text: t }));
+  const messages = texts.map(t => ({ type: "text", text: t }));
   const out = { version: "v2", content: { messages } };
+
   if (qrs.length) out.content.quick_replies = qrs;
 
-  // <<< IMPORTANT: always include state for ManyChat mapping >>>
-  const stateObj = (payload && payload.state !== undefined) ? payload.state : {};
-  out.state = stateObj;
-  try { out.state_json = JSON.stringify(stateObj); } catch { out.state_json = "{}"; }
-
-  // export first text for optional mapping to sds_reply
-  if (messages.length && messages[0]?.text) out.reply_text = messages[0].text;
+  // >>> ALWAYS provide state + state_json + reply_text
+  const st = (payload && payload.state !== undefined) ? payload.state : {};
+  out.state = st;
+  try { out.state_json = JSON.stringify(st); } catch { out.state_json = "{}"; }
+  out.reply_text = messages[0]?.text || "";
 
   if (payload && payload.error != null) out.error = payload.error;
   if (payload && payload.intentHandled) out.intentHandled = payload.intentHandled;
 
   return out;
 }
+
 /* ========================= API Handler (prompts + routing) ========================= */
 function repromptForStep(state = {}) {
   const s = state.step || "";
@@ -653,18 +655,36 @@ module.exports = async (req, res) => {
       try { state = JSON.parse(state); } catch { state = {}; }
     }
     if (!Array.isArray(state.faqLog)) state.faqLog = [];
-
+// --- SAFETY: recover state if MC sends only state_json or an empty state ---
+if ((!state || !Object.keys(state).length) && typeof body.state_json === "string") {
+  try { state = JSON.parse(body.state_json) || {}; } catch {}
+}
+// Ensure we always proceed with an object
+if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
     // Detect ManyChat origin and auto-wrap as v2
-    const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
-    const originalJson = res.json.bind(res);
-    res.json = (data) => {
-      try {
-        if (fromManyChat) return originalJson(toManyChatV2(data));
-        return originalJson(data);
-      } catch {
-        return originalJson(data);
-      }
-    };
+const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
+const originalJson = res.json.bind(res);
+
+// >>> REPLACE your existing res.json wrapper with this:
+res.json = (data) => {
+  try {
+    // 1) Always include a state object so ManyChat "Response mapping" can update sds_state
+    if (data == null) data = {};
+    if (typeof data === "string") data = { reply: data };
+    if (data.state === undefined) data.state = state;
+
+    // 2) Only wrap for ManyChat. Web widget should get raw (non-v2) shape.
+    if (fromManyChat) {
+      return originalJson(toManyChatV2(data));
+    }
+    return originalJson(data);
+  } catch {
+    // If anything odd happens, still return something usable
+    try { return originalJson(fromManyChat ? toManyChatV2({ reply: "", state }) : { reply: "", state }); }
+    catch { return originalJson({ reply: "", state }); }
+  }
+};
+
 
     // Initial entry (button click / test) → intro
     if (body.init || (!user && !state.step)) {
