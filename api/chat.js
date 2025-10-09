@@ -637,30 +637,40 @@ module.exports = async (req, res) => {
     const body = req.body || {};
 
     // Accept ManyChat + Web inputs (text/click/payload)
-    const userRaw =
-      (typeof body.text === "string" && body.text) ||
-      (typeof body.message === "string" && body.message) ||
-      (typeof body?.message?.text === "string" && body.message.text) ||
-      (typeof body.input === "string" && body.input) ||
-      (typeof body.payload === "string" && body.payload) ||
-      (typeof body.content === "string" && body.content) ||
-      "";
+const userRaw =
+  (typeof body.text === "string" && body.text) ||
+  (typeof body.message === "string" && body.message) ||
+  (typeof body?.message?.text === "string" && body.message.text) ||
+  (typeof body.input === "string" && body.input) ||
+  (typeof body.payload === "string" && body.payload) ||
+  (typeof body.content === "string" && body.content) ||
+  "";
 
-    const user = userRaw.trim();
-    const msg  = user.toLowerCase();
+const user = String(userRaw || "").trim();
+const msg  = user.toLowerCase();
 
-    // Accept state as object or JSON string
-    let state = body.state || {};
-    if (typeof state === "string") {
-      try { state = JSON.parse(state); } catch { state = {}; }
-    }
-    if (!Array.isArray(state.faqLog)) state.faqLog = [];
-// --- SAFETY: recover state if MC sends only state_json or an empty state ---
-if ((!state || !Object.keys(state).length) && typeof body.state_json === "string") {
-  try { state = JSON.parse(body.state_json) || {}; } catch {}
+// Accept state as object or JSON string
+let state = body.state ?? {};
+if (typeof state === "string") {
+  try { state = JSON.parse(state); } catch { state = {}; }
 }
-// Ensure we always proceed with an object
+
+// Recover state from state_json if state is empty or invalid
+if (
+  (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
+  typeof body.state_json === "string" &&
+  body.state_json.trim()
+) {
+  try { state = JSON.parse(body.state_json) || {}; } catch { state = {}; }
+}
+
+// Final guard: ensure state is a plain object
 if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+
+// Ensure faqLog exists
+if (!Array.isArray(state.faqLog)) state.faqLog = [];
+
+    
     // Detect ManyChat origin and auto-wrap as v2
 const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
 const originalJson = res.json.bind(res);
