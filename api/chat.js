@@ -655,16 +655,12 @@ module.exports = async (req, res) => {
     if (!Array.isArray(state.faqLog)) state.faqLog = [];
 
     // Detect ManyChat origin and auto-wrap as v2
-    const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
     const originalJson = res.json.bind(res);
-    res.json = (data) => {
-      try {
-        if (fromManyChat) return originalJson(toManyChatV2(data));
-        return originalJson(data);
-      } catch {
-        return originalJson(data);
-      }
-    };
+res.json = (data) => {
+  try { return originalJson(toManyChatV2(data)); }
+  catch { return originalJson(data); }
+};
+
 
     // Initial entry (button click / test) → intro
     if (body.init || (!user && !state.step)) {
