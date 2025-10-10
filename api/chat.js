@@ -670,6 +670,34 @@ if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
 // Ensure faqLog exists
 if (!Array.isArray(state.faqLog)) state.faqLog = [];
 
+// ---- Step recovery from last prompt (ManyChat fallback) ----
+const last =
+  (typeof body.last === "string" && body.last) ||
+  (typeof body.last_reply === "string" && body.last_reply) ||
+  "";
+
+if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+if (!state.step && last) {
+  const l = last.toLowerCase();
+
+  if (/what areas would you like us to clean/.test(l)) {
+    state.step = "carpet_details";
+  } else if (/what upholstery pieces/.test(l)) {
+    state.step = "upholstery_details";
+  } else if (/air duct cleaning — what you get|choose a package|basic|deep/.test(l)) {
+    state.step = "duct_package";
+  } else if (/how many hvac systems/.test(l)) {
+    state.step = "duct_systems";
+  } else if (/what day would you like the cleaning/.test(l)) {
+    state.step = "collect_date";
+  } else if (/which time frame works|pick a time window/.test(l)) {
+    state.step = "collect_window";
+  } else if (/do you have any notes|special instructions/.test(l)) {
+    state.step = "collect_notes";
+  }
+}
+// ------------------------------------------------------------
+
     
     // Detect ManyChat origin and auto-wrap as v2
 const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
