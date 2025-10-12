@@ -700,29 +700,43 @@ if (!state.step && last) {
 // ------------------------------------------------------------
 
     
-    // Detect ManyChat origin and auto-wrap as v2
+  // Detect ManyChat origin and auto-wrap as v2
 const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
 const originalJson = res.json.bind(res);
 
-// >>> REPLACE your existing res.json wrapper with this:
+// === SAFE WRAPPER (works for BOTH Web + ManyChat) ===
 res.json = (data) => {
   try {
-    // 1) Always include a state object so ManyChat "Response mapping" can update sds_state
-    if (data == null) data = {};
-    if (typeof data === "string") data = { reply: data };
-    if (data.state === undefined) data.state = state;
+    // Normalize to an object with a reply field
+    let out = (data == null) ? {} : (typeof data === "string" ? { reply: data } : { ...data });
 
-    // 2) Only wrap for ManyChat. Web widget should get raw (non-v2) shape.
+    // Always ensure state exists so MC mapping (and web) can update/keep it
+    if (out.state === undefined) out.state = state;
+
+    // Build v2 envelope (also gives us reply_text + state_json)
+    const v2 = toManyChatV2(out);
+
+    // For web: keep legacy shape BUT also include the helper fields so nothing breaks
+    // For ManyChat: return the clean v2 only
     if (fromManyChat) {
-      return originalJson(toManyChatV2(data));
+      return originalJson(v2);
+    } else {
+      // Merge helpers onto the legacy/top-level payload the web widget reads
+      out.state_json = v2.state_json;
+      out.reply_text = v2.reply_text || (typeof out.reply === "string" ? out.reply : "");
+      return originalJson(out);
     }
-    return originalJson(data);
-  } catch {
-    // If anything odd happens, still return something usable
-    try { return originalJson(fromManyChat ? toManyChatV2({ reply: "", state }) : { reply: "", state }); }
-    catch { return originalJson({ reply: "", state }); }
+  } catch (e) {
+    // Last-resort: return something valid
+    try {
+      if (fromManyChat) return originalJson(toManyChatV2({ reply: "", state }));
+      return originalJson({ reply: "", state, state_json: "{}", reply_text: "" });
+    } catch {
+      return originalJson({ reply: "", state });
+    }
   }
 };
+
 
 
     // Initial entry (button click / test) → intro
