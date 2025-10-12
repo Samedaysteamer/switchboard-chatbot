@@ -704,25 +704,26 @@ if (!state.step && last) {
 const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
 const originalJson = res.json.bind(res);
 
-// >>> REPLACE your existing res.json wrapper with this:
+// Always wrap so $.state_json exists for ManyChat mapping
 res.json = (data) => {
   try {
-    // 1) Always include a state object so ManyChat "Response mapping" can update sds_state
+    // normalize
     if (data == null) data = {};
     if (typeof data === "string") data = { reply: data };
+    if (data.reply == null && typeof data.text === "string") data.reply = data.text;
+
+    // make sure a state object is present (so we can stringify it)
     if (data.state === undefined) data.state = state;
 
-    // 2) Only wrap for ManyChat. Web widget should get raw (non-v2) shape.
-    if (fromManyChat) {
-      return originalJson(toManyChatV2(data));
-    }
+    // IMPORTANT: always return MC v2 shape (even for web) so state_json is present
+    const mc = toManyChatV2(data);
+    return originalJson(mc);
+  } catch (e) {
+    // last-resort fallback
     return originalJson(data);
-  } catch {
-    // If anything odd happens, still return something usable
-    try { return originalJson(fromManyChat ? toManyChatV2({ reply: "", state }) : { reply: "", state }); }
-    catch { return originalJson({ reply: "", state }); }
   }
 };
+
 
 
     // Initial entry (button click / test) → intro
