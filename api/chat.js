@@ -752,8 +752,9 @@ res.json = (data) => {
 
     // If we got user text but ManyChat didn't persist state, fall into choose_service
     if (!state.step && user) {
-      state.step = "choose_service";
-    }
+  return res.status(200).json(intro());
+}
+
 
     // If we got no user text but have a step, just re-prompt the current step
     if (!user) {
