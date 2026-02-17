@@ -1,4 +1,4 @@
- export default async function handler(req, res) {
+export default async function handler(req, res) {
   // 1) META VERIFY (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
@@ -8,7 +8,7 @@
     if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
       return res.status(200).send(challenge);
     }
-    return res.sendStatus(403);
+    return res.status(403).send("Forbidden");
   }
 
   // 2) INCOMING EVENTS (POST)
@@ -16,9 +16,9 @@
     console.log("META_WEBHOOK_POST_RECEIVED");
     console.log(JSON.stringify(req.body));
 
-    // IMPORTANT: Respond FAST so Meta doesn’t retry
-    return res.sendStatus(200);
+    // IMPORTANT: respond FAST so Meta doesn't retry
+    return res.status(200).send("EVENT_RECEIVED");
   }
 
-  return res.sendStatus(405);
+  return res.status(405).send("Method Not Allowed");
 }
