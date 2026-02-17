@@ -9,8 +9,11 @@ export default async function handler(req, res) {
     const challenge = req.query["hub.challenge"];
 
     if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+      console.log("WEBHOOK_VERIFIED");
       return res.status(200).send(challenge);
     }
+
+    console.log("WEBHOOK_VERIFY_FAILED");
     return res.status(403).send("Forbidden");
   }
 
