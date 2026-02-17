@@ -1,75 +1,65 @@
 export default async function handler(req, res) {
-  // Build stamp so you ALWAYS know which deployment handled the hit
-  const build = {
-    deployment: process.env.VERCEL_DEPLOYMENT_ID || "unknown",
-    sha: process.env.VERCEL_GIT_COMMIT_SHA || "unknown",
-    ref: process.env.VERCEL_GIT_COMMIT_REF || "unknown",
-    url: process.env.VERCEL_URL || "unknown",
-  };
-
-  // Robust URL parsing (no url.parse deprecation weirdness)
-  const fullUrl = new URL(req.url, `https://${req.headers.host || "localhost"}`);
-
-  console.log("WEBHOOK_HIT", {
-    method: req.method,
-    path: fullUrl.pathname,
-    query: fullUrl.search,
-    build,
-  });
-
-  // Helper: read raw body if req.body isn't populated
-  async function readBody() {
-    if (req.body !== undefined && req.body !== null && req.body !== "") return req.body;
-
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const raw = Buffer.concat(chunks).toString("utf8");
-    if (!raw) return null;
-
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return { raw };
-    }
-  }
+  console.log("WEBHOOK_HIT", req.method, req.url);
 
   // 1) Meta verify (GET)
   if (req.method === "GET") {
-    const mode = fullUrl.searchParams.get("hub.mode");
-    const token = fullUrl.searchParams.get("hub.verify_token");
-    const challenge = fullUrl.searchParams.get("hub.challenge");
-
-    console.log("WEBHOOK_VERIFY_CHECK", { mode, tokenProvided: !!token });
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
 
     if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
-      console.log("WEBHOOK_VERIFY_OK", { challenge });
-      return res.status(200).send(challenge || "");
+      return res.status(200).send(challenge);
     }
-
-    console.log("WEBHOOK_VERIFY_FAIL", { mode, token });
     return res.status(403).send("Forbidden");
   }
 
   // 2) Incoming events (POST)
   if (req.method === "POST") {
-    const signature = req.headers["x-hub-signature-256"];
-    const body = await readBody();
+    // respond FAST so Meta doesn’t retry
+    res.status(200).send("EVENT_RECEIVED");
 
-    console.log("META_WEBHOOK_POST_RECEIVED", {
-      signaturePresent: !!signature,
-      bodyPreview:
-        typeof body === "string"
-          ? body.slice(0, 300)
-          : JSON.stringify(body).slice(0, 300),
-    });
+    try {
+      const entry = req.body?.entry?.[0];
+      const messaging = entry?.messaging?.[0];
+      const senderId = messaging?.sender?.id;
+      const text = messaging?.message?.text;
 
-    // Respond FAST so Meta doesn’t retry
-    return res.status(200).send("EVENT_RECEIVED");
-  }
+      console.log("META_WEBHOOK_POST_RECEIVED");
+      console.log("SENDER", senderId);
+      console.log("IN_TEXT", text);
 
-  // Optional: let HEAD succeed (some systems ping with HEAD)
-  if (req.method === "HEAD") {
-    return res.status(200).end();
+      // If it’s not a normal text message, do nothing (still already 200’d)
+      if (!senderId || !text) return;
+
+      // TEMP reply (proves the pipe works)
+      const replyText = `Got it: "${text}"`;
+
+      const url = `https://graph.facebook.com/v24.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`;
+
+      const payload = {
+        recipient: { id: senderId },
+        messaging_type: "RESPONSE",
+        message: { text: replyText },
+      };
+
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        console.log("SEND_API_ERROR", data);
+      } else {
+        console.log("SENT_OK", data);
+      }
+    } catch (err) {
+      console.log("WEBHOOK_POST_HANDLER_ERROR", String(err));
+    }
+
+    return;
   }
 
   return res.status(405).send("Method Not Allowed");
