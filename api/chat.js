@@ -1,10 +1,14 @@
 // Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
+// - Keeps your existing ManyChat + Web widget behavior
+// - Adds DIRECT Meta Messenger Webhook support (object:"page") with PSID state persistence + Send API replies
 // - Always includes `state` (object) AND `state_json` (string) for ManyChat mapping
 // - Adds `reply_text` (string) so you can map the next prompt into a text block
 // - Safe input extraction + ManyChat v2 auto-wrapper (Messenger)
 // - Fallback: if user typed but state.step missing, jump to choose_service
 
 /* ========================= Utilities ========================= */
+const crypto = require("crypto");
+
 const SMALL = {
   zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
   ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
@@ -39,9 +43,122 @@ try { validZipCodes = require("../zips.js").validZipCodes || null; } catch { /* 
 
 const SERVICE_CHOICES = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
 const UPH_CHOICES     = ["Sectional", "Sofa", "Loveseat", "Recliner", "Ottoman", "Dining chair", "Mattress"];
-const TIME_WINDOWS    = ["8 AM–12 PM", "1 PM–5 PM"];
+
+// UPDATED: add optional late window
+const TIME_WINDOWS    = ["8 AM–12 PM", "1 PM–5 PM", "3 PM–7 PM"];
 
 const UPH_PRICES = { loveseat:100, recliner:80, ottoman:50, "dining chair":25, sofa:150, mattress:150 };
+
+/* ========================= Meta Messenger Direct Support =========================
+   If Meta calls this endpoint as a Page webhook (body.object === "page"), we:
+   1) extract PSID + text/postback
+   2) load state by PSID (KV preferred; in-memory fallback)
+   3) run the SAME conversation core
+   4) send reply via Graph API (Send API)
+=============================================================================== */
+const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN || "";
+const FB_VERIFY_TOKEN      = process.env.FB_VERIFY_TOKEN      || "switchboard_verify_123";
+const FB_APP_SECRET        = process.env.FB_APP_SECRET        || "";
+
+// Optional: Vercel KV persistence (recommended). If not installed/configured, falls back to in-memory.
+let kv = null;
+try {
+  const vercelKv = require("@vercel/kv");
+  kv = vercelKv?.kv || vercelKv;
+} catch { kv = null; }
+
+const __memState = new Map();
+
+async function getStateByPSID(psid) {
+  const key = `sds:psid:${psid}`;
+  if (kv && typeof kv.get === "function") {
+    try {
+      const raw = await kv.get(key);
+      if (!raw) return null;
+      if (typeof raw === "string") {
+        try { return JSON.parse(raw); } catch { return null; }
+      }
+      return raw;
+    } catch { return null; }
+  }
+  return __memState.get(key) || null;
+}
+
+async function setStateByPSID(psid, stateObj) {
+  const key = `sds:psid:${psid}`;
+  const safe = (stateObj && typeof stateObj === "object" && !Array.isArray(stateObj)) ? stateObj : {};
+  if (kv && typeof kv.set === "function") {
+    try { await kv.set(key, JSON.stringify(safe)); } catch { /* ignore */ }
+    return;
+  }
+  __memState.set(key, safe);
+}
+
+function toFBQuickReplies(quickReplies) {
+  if (!Array.isArray(quickReplies) || !quickReplies.length) return undefined;
+  return quickReplies.slice(0, 13).map(q => {
+    const title = typeof q === "string" ? q : (q?.title || q?.text || "");
+    const payload = (typeof q === "string" ? q : (q?.payload || title || "")).toLowerCase();
+    return { content_type: "text", title: String(title).slice(0, 20), payload: String(payload).slice(0, 1000) };
+  });
+}
+
+async function fbSendText(psid, text, quickReplies) {
+  if (!FB_PAGE_ACCESS_TOKEN) {
+    console.error("Missing FB_PAGE_ACCESS_TOKEN (required for direct Messenger replies).");
+    return;
+  }
+  const _fetch = global.fetch || require("node-fetch");
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(FB_PAGE_ACCESS_TOKEN)}`;
+
+  const msg = { text: String(text || "").trim() || " " };
+  const qr = toFBQuickReplies(quickReplies);
+  if (qr) msg.quick_replies = qr;
+
+  try {
+    await _fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_type: "RESPONSE",
+        recipient: { id: psid },
+        message: msg
+      })
+    });
+  } catch (e) {
+    console.error("fbSendText failed", e);
+  }
+}
+
+// Optional signature validation (permissive if you don’t have raw body wired up)
+function verifyFBSignature(req) {
+  if (!FB_APP_SECRET) return true;
+
+  const sig = req.headers?.["x-hub-signature-256"] || req.headers?.["X-Hub-Signature-256"];
+  if (!sig || typeof sig !== "string") return true;
+
+  try {
+    // NOTE: real verification needs raw body; this is best-effort without breaking deployments
+    const body = JSON.stringify(req.body || {});
+    const expected = "sha256=" + crypto.createHmac("sha256", FB_APP_SECRET).update(body).digest("hex");
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch {
+    return true;
+  }
+}
+
+function extractMetaIncoming(evt) {
+  const isGetStarted = evt?.postback?.payload === "GET_STARTED";
+  if (isGetStarted) return { init: true, text: "" };
+
+  const postbackPayload = evt?.postback?.payload;
+  const postbackTitle   = evt?.postback?.title;
+  const quickPayload    = evt?.message?.quick_reply?.payload;
+  const txt             = evt?.message?.text;
+
+  const incoming = (postbackTitle || postbackPayload || quickPayload || txt || "").trim();
+  return { init: false, text: incoming };
+}
 
 /* ========================= Interrupts (Q&A) ========================= */
 function detectQuickIntents(text="") {
@@ -281,8 +398,11 @@ function parseUph(text="") {
 }
 
 /* ========================= Booking summary builder ========================= */
-function formatPhone(digits){ return (digits && digits.length===10) ? `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}` : digits; }
+function formatPhone(digits){
+  return (digits && digits.length===10) ? `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}` : digits;
+}
 
+// UPDATED: removed dispatcher phone from summary
 function bookingSummary(state) {
   const parts = [];
   if (state.carpet)     parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -308,7 +428,7 @@ ${parts.join("\n")}
 **Building:** ${state.building || "-"}${state.floor?` (Floor ${state.floor})`:""}
 **Notes:** ${state.notes || "-"}
 
-If you would like to make any changes to your work order, please give the dispatcher a call at (678) 929-8202.`;
+If you need to make changes, reply back here and we’ll update the work order.`;
 }
 
 /* === Zap helpers (form-encoded) === */
@@ -351,8 +471,8 @@ function disarmFollowUp(state) {
   state._followUpArmed = false;
   state._followUpDueAt = 0;
 }
-function hasContact(state){ 
-  return !!(state.name && state.phone && /^\d{10}$/.test(state.phone)); 
+function hasContact(state){
+  return !!(state.name && state.phone && /^\d{10}$/.test(state.phone));
 }
 async function sendSessionIfEligible(state, reason){
   if (!hasContact(state)) return;
@@ -374,11 +494,11 @@ async function sendSessionIfEligible(state, reason){
     booking_complete: false,
     conversation: snapshotForSession(state) + (reason ? ` | Reason: ${reason}` : "")
   };
-  try { 
-    await sendSessionZapFormEncoded(payload); 
-    state._sessionSent = true; 
-  } catch(e){ 
-    console.error("Session Zap failed", e); 
+  try {
+    await sendSessionZapFormEncoded(payload);
+    state._sessionSent = true;
+  } catch(e){
+    console.error("Session Zap failed", e);
   }
 }
 function refreshFollowUpIfEligible(state){
@@ -430,7 +550,7 @@ function applySmartCorrections(user, state) {
     return { reply: `Do you have any notes or special instructions?`, quickReplies: ["Yes, I have notes","No, continue"] };
   }
 
-  // dynamic carpet tweaks
+  // dynamic carpet tweaks (unchanged)
   if (state.carpet && state.carpet.detail) {
     const d = { rooms:0, halls:0, stairs:0, extras:0, rugs:0, ...state.carpet.detail };
     let changed = false;
@@ -533,7 +653,6 @@ function intro() {
 function toManyChatV2(payload) {
   if (payload && payload.version === "v2") return payload;
 
-  // Gather text(s) to send
   const texts = [];
   if (typeof payload === "string") {
     texts.push(payload);
@@ -542,9 +661,8 @@ function toManyChatV2(payload) {
   } else if (payload && typeof payload.text === "string") {
     texts.push(payload.text);
   }
-  if (texts.length === 0) texts.push(""); // never send empty content array
+  if (texts.length === 0) texts.push("");
 
-  // Quick replies
   let qrs = [];
   if (payload && Array.isArray(payload.quickReplies)) {
     qrs = payload.quickReplies
@@ -565,7 +683,6 @@ function toManyChatV2(payload) {
 
   if (qrs.length) out.content.quick_replies = qrs;
 
-  // >>> ALWAYS provide state + state_json + reply_text
   const st = (payload && payload.state !== undefined) ? payload.state : {};
   out.state = st;
   try { out.state_json = JSON.stringify(st); } catch { out.state_json = "{}"; }
@@ -577,7 +694,7 @@ function toManyChatV2(payload) {
   return out;
 }
 
-/* ========================= API Handler (prompts + routing) ========================= */
+/* ========================= API Handler helpers ========================= */
 function repromptForStep(state = {}) {
   const s = state.step || "";
   switch (s) {
@@ -630,130 +747,87 @@ function repromptForStep(state = {}) {
   }
 }
 
-module.exports = async (req, res) => {
-
-// Messenger Webhook Verification
-const VERIFY_TOKEN = "switchboard_verify_123";
-
-if (req.method === "GET") {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  } else {
-    return res.sendStatus(403);
-  }
-}
-
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
+/* ========================= CORE POST HANDLER (ManyChat + Web) ========================= */
+async function handleCorePOST(req, res) {
   try {
     const body = req.body || {};
 
     // Accept ManyChat + Web inputs (text/click/payload)
-const userRaw =
-  (typeof body.text === "string" && body.text) ||
-  (typeof body.message === "string" && body.message) ||
-  (typeof body?.message?.text === "string" && body.message.text) ||
-  (typeof body.input === "string" && body.input) ||
-  (typeof body.payload === "string" && body.payload) ||
-  (typeof body.content === "string" && body.content) ||
-  "";
+    const userRaw =
+      (typeof body.text === "string" && body.text) ||
+      (typeof body.message === "string" && body.message) ||
+      (typeof body?.message?.text === "string" && body.message.text) ||
+      (typeof body.input === "string" && body.input) ||
+      (typeof body.payload === "string" && body.payload) ||
+      (typeof body.content === "string" && body.content) ||
+      "";
 
-const user = String(userRaw || "").trim();
-const msg  = user.toLowerCase();
+    const user = String(userRaw || "").trim();
+    const msg  = user.toLowerCase();
 
-// Accept state as object or JSON string
-let state = body.state ?? {};
-if (typeof state === "string") {
-  try { state = JSON.parse(state); } catch { state = {}; }
-}
-
-// Recover state from state_json if state is empty or invalid
-if (
-  (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
-  typeof body.state_json === "string" &&
-  body.state_json.trim()
-) {
-  try { state = JSON.parse(body.state_json) || {}; } catch { state = {}; }
-}
-
-// Final guard: ensure state is a plain object
-if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
-
-// Ensure faqLog exists
-if (!Array.isArray(state.faqLog)) state.faqLog = [];
-
-// ---- Step recovery from last prompt (ManyChat fallback) ----
-const last =
-  (typeof body.last === "string" && body.last) ||
-  (typeof body.last_reply === "string" && body.last_reply) ||
-  "";
-
-if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
-if (!state.step && last) {
-  const l = last.toLowerCase();
-
-  if (/what areas would you like us to clean/.test(l)) {
-    state.step = "carpet_details";
-  } else if (/what upholstery pieces/.test(l)) {
-    state.step = "upholstery_details";
-  } else if (/air duct cleaning — what you get|choose a package|basic|deep/.test(l)) {
-    state.step = "duct_package";
-  } else if (/how many hvac systems/.test(l)) {
-    state.step = "duct_systems";
-  } else if (/what day would you like the cleaning/.test(l)) {
-    state.step = "collect_date";
-  } else if (/which time frame works|pick a time window/.test(l)) {
-    state.step = "collect_window";
-  } else if (/do you have any notes|special instructions/.test(l)) {
-    state.step = "collect_notes";
-  }
-}
-
-// ------------------------------------------------------------
-
-    
-  // Detect ManyChat origin and auto-wrap as v2
-const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
-const originalJson = res.json.bind(res);
-
-// === SAFE WRAPPER (works for BOTH Web + ManyChat) ===
-res.json = (data) => {
-  try {
-    // Normalize to an object with a reply field
-    let out = (data == null) ? {} : (typeof data === "string" ? { reply: data } : { ...data });
-
-    // Always ensure state exists so MC mapping (and web) can update/keep it
-    if (out.state === undefined) out.state = state;
-
-    // Build v2 envelope (also gives us reply_text + state_json)
-    const v2 = toManyChatV2(out);
-
-    // For web: keep legacy shape BUT also include the helper fields so nothing breaks
-    // For ManyChat: return the clean v2 only
-    if (fromManyChat) {
-      return originalJson(v2);
-    } else {
-      // Merge helpers onto the legacy/top-level payload the web widget reads
-      out.state_json = v2.state_json;
-      out.reply_text = v2.reply_text || (typeof out.reply === "string" ? out.reply : "");
-      return originalJson(out);
+    // Accept state as object or JSON string
+    let state = body.state ?? {};
+    if (typeof state === "string") {
+      try { state = JSON.parse(state); } catch { state = {}; }
     }
-  } catch (e) {
-    // Last-resort: return something valid
-    try {
-      if (fromManyChat) return originalJson(toManyChatV2({ reply: "", state }));
-      return originalJson({ reply: "", state, state_json: "{}", reply_text: "" });
-    } catch {
-      return originalJson({ reply: "", state });
+
+    // Recover state from state_json if state is empty or invalid
+    if (
+      (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
+      typeof body.state_json === "string" &&
+      body.state_json.trim()
+    ) {
+      try { state = JSON.parse(body.state_json) || {}; } catch { state = {}; }
     }
-  }
-};
 
+    if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+    if (!Array.isArray(state.faqLog)) state.faqLog = [];
 
+    // ---- Step recovery from last prompt (ManyChat fallback) ----
+    const last =
+      (typeof body.last === "string" && body.last) ||
+      (typeof body.last_reply === "string" && body.last_reply) ||
+      "";
+
+    if (!state.step && last) {
+      const l = last.toLowerCase();
+      if (/what areas would you like us to clean/.test(l)) state.step = "carpet_details";
+      else if (/what upholstery pieces/.test(l)) state.step = "upholstery_details";
+      else if (/air duct cleaning — what you get|choose a package|basic|deep/.test(l)) state.step = "duct_package";
+      else if (/how many hvac systems/.test(l)) state.step = "duct_systems";
+      else if (/what day would you like the cleaning/.test(l)) state.step = "collect_date";
+      else if (/which time frame works|pick a time window/.test(l)) state.step = "collect_window";
+      else if (/do you have any notes|special instructions/.test(l)) state.step = "collect_notes";
+    }
+
+    // Detect ManyChat origin and auto-wrap as v2
+    const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
+    const originalJson = res.json.bind(res);
+
+    // === SAFE WRAPPER (works for BOTH Web + ManyChat) ===
+    res.json = (data) => {
+      try {
+        let out = (data == null) ? {} : (typeof data === "string" ? { reply: data } : { ...data });
+        if (out.state === undefined) out.state = state;
+
+        const v2 = toManyChatV2(out);
+
+        if (fromManyChat) {
+          return originalJson(v2);
+        } else {
+          out.state_json = v2.state_json;
+          out.reply_text = v2.reply_text || (typeof out.reply === "string" ? out.reply : "");
+          return originalJson(out);
+        }
+      } catch (e) {
+        try {
+          if (fromManyChat) return originalJson(toManyChatV2({ reply: "", state }));
+          return originalJson({ reply: "", state, state_json: "{}", reply_text: "" });
+        } catch {
+          return originalJson({ reply: "", state });
+        }
+      }
+    };
 
     // Initial entry (button click / test) → intro
     if (body.init || (!user && !state.step)) {
@@ -768,9 +842,8 @@ res.json = (data) => {
 
     // If we got user text but ManyChat didn't persist state, fall into choose_service
     if (!state.step && user) {
-  return res.status(200).json(intro());
-}
-
+      return res.status(200).json(intro());
+    }
 
     // If we got no user text but have a step, just re-prompt the current step
     if (!user) {
@@ -780,11 +853,8 @@ res.json = (data) => {
     // Smart corrections FIRST
     const correctionReply = applySmartCorrections(user, state);
     if (correctionReply) {
-      if (typeof correctionReply === "string") {
-        return res.status(200).json({ reply: correctionReply, state });
-      } else {
-        return res.status(200).json({ ...correctionReply, state });
-      }
+      if (typeof correctionReply === "string") return res.status(200).json({ reply: correctionReply, state });
+      return res.status(200).json({ ...correctionReply, state });
     }
 
     // FAQ at any time
@@ -818,7 +888,6 @@ Proceed with booking?`;
     }
 
     switch (state.step) {
-      /* ========== Choose service ========== */
       case "choose_service": {
         let choice = null;
         if (/duct|air\s*duct/.test(msg)) choice = "duct";
@@ -838,7 +907,6 @@ Proceed with booking?`;
         return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic","Deep"], state });
       }
 
-      /* ========== Carpet flow ========== */
       case "carpet_details": {
         const parsed = parseAreas(user);
         if (parsed.billable === 0) {
@@ -860,7 +928,8 @@ Proceed with booking?`;
         }
         if (/no|not now|skip/i.test(msg)) {
           await sendSessionIfEligible(state, "user opted out before notes");
-          state = { step: "choose_service", faqLog: state.faqLog };
+          const keepFaq = state.faqLog;
+          state = { step: "choose_service", faqLog: keepFaq };
           return res.status(200).json({
             reply: `All good – if you’d like a quote later just say “carpet”, “upholstery”, or “ducts”.`,
             quickReplies: SERVICE_CHOICES,
@@ -886,7 +955,6 @@ Proceed with booking?`;
         return res.status(200).json({ reply: `Great — what upholstery pieces would you like cleaned?`, quickReplies: UPH_CHOICES, state });
       }
 
-      /* ========== Upholstery flow ========== */
       case "upholstery_details": {
         if (/\bsofa\b/i.test(user) && !/\d/.test(user)) {
           state.step = "upholstery_cushions";
@@ -999,7 +1067,6 @@ Proceed with booking?`;
         return res.status(200).json({ reply: `Tap one of the options to change, or Cancel to proceed.`, state });
       }
 
-      /* ========== Carpet upsell after upholstery ========== */
       case "carpet_upsell_offer": {
         if (/no|skip/i.test(msg)) return res.status(200).json(promptAddress(state));
         state.addingCarpetAfterUph = true;
@@ -1007,7 +1074,6 @@ Proceed with booking?`;
         return res.status(200).json({ reply:`Awesome — how many carpet areas should I price? (e.g., “3 rooms, hallway, 1 rug”).`, state });
       }
 
-      /* ========== Duct flow ========== */
       case "duct_package": {
         if (!/basic|deep/.test(msg)) {
           return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic","Deep"], state });
@@ -1049,7 +1115,6 @@ Proceed with booking?`;
         return res.status(200).json(promptAddress(state));
       }
 
-      /* ========== Address → Name → Phone → Email → Date → Details → Notes → Summary ========== */
       case "confirm_reuse_address": {
         if (/^y/i.test(msg)) return res.status(200).json(promptName(state));
         state.address = ""; state.Address = ""; state.step = "collect_address";
@@ -1293,7 +1358,8 @@ Proceed with booking?`;
 
       case "post_summary_offer": {
         if (/no|thanks/i.test(msg)) {
-          state = { step:"choose_service", faqLog: state.faqLog };
+          const keepFaq = state.faqLog;
+          state = { step:"choose_service", faqLog: keepFaq };
           return res.status(200).json({ reply:`Got it! If you need anything else, just say “carpet”, “upholstery”, or “ducts”.`, quickReplies: SERVICE_CHOICES, state });
         }
         if (state.duct) {
@@ -1302,12 +1368,14 @@ Proceed with booking?`;
         } else {
           if (/duct|tell me/i.test(msg)) { state.step="duct_package"; return res.status(200).json({ reply: ductIntroCopy(), quickReplies:["Basic","Deep"], state }); }
         }
-        state = { step:"choose_service", faqLog: state.faqLog };
+        const keepFaq = state.faqLog;
+        state = { step:"choose_service", faqLog: keepFaq };
         return res.status(200).json({ reply:`No problem. If you’d like another quote, pick a service:`, quickReplies: SERVICE_CHOICES, state });
       }
 
       default: {
-        state = { step: "choose_service", faqLog: state.faqLog || [] };
+        const keepFaq = state.faqLog;
+        state = { step: "choose_service", faqLog: keepFaq || [] };
         return res.status(200).json(intro());
       }
     }
@@ -1316,9 +1384,85 @@ Proceed with booking?`;
     return res.status(200).json({
       reply: `Sorry — something glitched on my end, but I’m still here. Tell me “carpet”, “upholstery”, or “ducts” and I’ll price it.`,
       state: { step: "choose_service", faqLog: [] },
-      error: String(err && err.message || err)
+      error: String((err && err.message) || err)
     });
   }
+}
+
+/* ========================= MAIN EXPORT ========================= */
+module.exports = async (req, res) => {
+  // Messenger Webhook Verification (Meta + direct)
+  if (req.method === "GET") {
+    const mode = req.query?.["hub.mode"];
+    const token = req.query?.["hub.verify_token"];
+    const challenge = req.query?.["hub.challenge"];
+
+    if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  }
+
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const body = req.body || {};
+
+  // ===== DIRECT META WEBHOOK BRANCH =====
+  // Meta payload: { object:"page", entry:[{ messaging:[ ... ]}] }
+  if (body && body.object === "page" && Array.isArray(body.entry)) {
+    if (!verifyFBSignature(req)) return res.sendStatus(403);
+
+    for (const entry of body.entry) {
+      const events = entry.messaging || [];
+      for (const evt of events) {
+        if (evt.delivery || evt.read) continue;
+        if (evt.message && evt.message.is_echo) continue;
+
+        const psid = evt?.sender?.id;
+        if (!psid) continue;
+
+        const incoming = extractMetaIncoming(evt);
+        let storedState = (await getStateByPSID(psid)) || {};
+
+        // Run core logic using a fake req/res to capture output
+        let captured = null;
+
+        const fakeReq = {
+          method: "POST",
+          headers: {},
+          query: {},
+          body: incoming.init
+            ? { init: true, state: storedState, source: "meta" }
+            : { text: incoming.text, state: storedState, source: "meta" }
+        };
+
+        const fakeRes = {
+          _status: 200,
+          status(code){ this._status = code; return this; },
+          json(obj){ captured = obj; return obj; },
+          send(str){ captured = { reply: String(str || ""), state: storedState }; return captured; },
+          sendStatus(code){ this._status = code; captured = null; return null; }
+        };
+
+        await handleCorePOST(fakeReq, fakeRes);
+
+        // Persist updated state
+        const nextState = (captured && captured.state && typeof captured.state === "object") ? captured.state : storedState;
+        await setStateByPSID(psid, nextState);
+
+        // Reply back to Messenger
+        const replyText = (captured && (captured.reply_text || captured.reply)) ? String(captured.reply_text || captured.reply) : "";
+        const quickReplies = captured?.quickReplies;
+
+        await fbSendText(psid, replyText || "How can we help?", quickReplies);
+      }
+    }
+
+    return res.status(200).send("EVENT_RECEIVED");
+  }
+
+  // ===== MANYCHAT + WEB BRANCH =====
+  return handleCorePOST(req, res);
 };
 
 /* ========================= ZAP HANDLERS (form-encoded) ========================= */
