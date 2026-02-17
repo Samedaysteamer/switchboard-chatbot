@@ -1,91 +1,76 @@
-// /api/webhook.js
-
-function reply(res, status, body) {
-  // Works in Next.js API routes (res.status().send)
-  if (typeof res.status === "function") return res.status(status).send(body);
-
-  // Works in plain Node/Vercel handlers (res.statusCode + res.end)
-  res.statusCode = status;
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.end(body);
-}
-
-function getQuery(req) {
-  // Next.js API routes
-  if (req.query) return req.query;
-
-  // Fallback for runtimes without req.query
-  const url = new URL(req.url, "http://localhost");
-  return Object.fromEntries(url.searchParams.entries());
-}
-
-async function readRawBody(req) {
-  // If the platform already parsed it (Next.js often does), prefer that
-  if (req.body !== undefined) return req.body;
-
-  // Otherwise read the stream
-  return await new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        // Try JSON first
-        resolve(data ? JSON.parse(data) : {});
-      } catch {
-        resolve(data);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
 export default async function handler(req, res) {
-  const url = new URL(req.url, "http://localhost");
-  console.log("WEBHOOK_HIT", req.method, url.pathname + url.search);
+  // Build stamp so you ALWAYS know which deployment handled the hit
+  const build = {
+    deployment: process.env.VERCEL_DEPLOYMENT_ID || "unknown",
+    sha: process.env.VERCEL_GIT_COMMIT_SHA || "unknown",
+    ref: process.env.VERCEL_GIT_COMMIT_REF || "unknown",
+    url: process.env.VERCEL_URL || "unknown",
+  };
+
+  // Robust URL parsing (no url.parse deprecation weirdness)
+  const fullUrl = new URL(req.url, `https://${req.headers.host || "localhost"}`);
+
+  console.log("WEBHOOK_HIT", {
+    method: req.method,
+    path: fullUrl.pathname,
+    query: fullUrl.search,
+    build,
+  });
+
+  // Helper: read raw body if req.body isn't populated
+  async function readBody() {
+    if (req.body !== undefined && req.body !== null && req.body !== "") return req.body;
+
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    if (!raw) return null;
+
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { raw };
+    }
+  }
 
   // 1) Meta verify (GET)
   if (req.method === "GET") {
-    const q = getQuery(req);
-    const mode = q["hub.mode"];
-    const token = q["hub.verify_token"];
-    const challenge = q["hub.challenge"];
+    const mode = fullUrl.searchParams.get("hub.mode");
+    const token = fullUrl.searchParams.get("hub.verify_token");
+    const challenge = fullUrl.searchParams.get("hub.challenge");
 
-    console.log("VERIFY_CHECK", {
-      mode,
-      token_received: token ? "present" : "missing",
-      token_matches_env: token === process.env.VERIFY_TOKEN,
-      challenge_present: challenge ? "yes" : "no",
-    });
+    console.log("WEBHOOK_VERIFY_CHECK", { mode, tokenProvided: !!token });
 
     if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
-      console.log("VERIFY_OK");
-      return reply(res, 200, String(challenge || ""));
+      console.log("WEBHOOK_VERIFY_OK", { challenge });
+      return res.status(200).send(challenge || "");
     }
 
-    console.log("VERIFY_FAIL");
-    return reply(res, 403, "Forbidden");
+    console.log("WEBHOOK_VERIFY_FAIL", { mode, token });
+    return res.status(403).send("Forbidden");
   }
 
   // 2) Incoming events (POST)
   if (req.method === "POST") {
-    const body = await readRawBody(req);
+    const signature = req.headers["x-hub-signature-256"];
+    const body = await readBody();
 
-    console.log("META_WEBHOOK_POST_RECEIVED");
-    console.log("HEADERS", {
-      "content-type": req.headers["content-type"],
-      "x-hub-signature-256": req.headers["x-hub-signature-256"] ? "present" : "missing",
+    console.log("META_WEBHOOK_POST_RECEIVED", {
+      signaturePresent: !!signature,
+      bodyPreview:
+        typeof body === "string"
+          ? body.slice(0, 300)
+          : JSON.stringify(body).slice(0, 300),
     });
 
-    // Log body safely
-    try {
-      console.log("JSON_BODY:", typeof body === "string" ? body.slice(0, 2000) : body);
-    } catch (e) {
-      console.log("BODY_LOG_FAIL", e?.message);
-    }
-
     // Respond FAST so Meta doesn’t retry
-    return reply(res, 200, "EVENT_RECEIVED");
+    return res.status(200).send("EVENT_RECEIVED");
   }
 
-  return reply(res, 405, "Method Not Allowed");
+  // Optional: let HEAD succeed (some systems ping with HEAD)
+  if (req.method === "HEAD") {
+    return res.status(200).end();
+  }
+
+  return res.status(405).send("Method Not Allowed");
 }
