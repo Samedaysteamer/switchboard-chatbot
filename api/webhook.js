@@ -1,5 +1,8 @@
 export default async function handler(req, res) {
-  // 1) META VERIFY (GET)
+  // Always log the hit (so you can’t miss it in Logs)
+  console.log("WEBHOOK_HIT", req.method, req.url);
+
+  // 1) Meta verify (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -11,12 +14,12 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
-  // 2) INCOMING EVENTS (POST)
+  // 2) Incoming events (POST)
   if (req.method === "POST") {
     console.log("META_WEBHOOK_POST_RECEIVED");
     console.log(JSON.stringify(req.body));
 
-    // IMPORTANT: respond FAST so Meta doesn't retry
+    // Respond FAST so Meta doesn’t retry
     return res.status(200).send("EVENT_RECEIVED");
   }
 
