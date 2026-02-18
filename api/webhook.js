@@ -1,57 +1,73 @@
-// /api/webhook.js
-
 export default async function handler(req, res) {
   // Never cache webhook responses
   res.setHeader("Cache-Control", "no-store");
 
-  console.log("WEBHOOK_VERSION", "2026-02-18_02");
+  console.log("WEBHOOK_VERSION", "2026-02-18_01");
   console.log("WEBHOOK_HIT", req.method, req.url);
 
   try {
+    // ----------------------------
     // 1) Meta verify (GET)
+    // ----------------------------
     if (req.method === "GET") {
-      const query = getQuery(req);
+      const mode = pickQuery(req, "hub.mode");
+      const token = pickQuery(req, "hub.verify_token");
+      const challenge = pickQuery(req, "hub.challenge");
 
-      const mode = query["hub.mode"];
-      const token = query["hub.verify_token"];
-      const challenge = query["hub.challenge"];
+      // If this is NOT a Meta verification call (no hub.* params),
+      // treat it as a simple health check.
+      const isVerifyAttempt = !!(mode || token || challenge);
 
-      // If this is NOT a Meta verification request, treat it as a healthcheck
-      if (!mode && !token && !challenge) {
-        return sendText(res, 200, "OK");
+      if (!isVerifyAttempt) {
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        return res.status(200).send("OK");
       }
 
-      const expected = (process.env.VERIFY_TOKEN || "").trim();
-      const provided = (token || "").toString().trim();
-
-      const ok = mode === "subscribe" && expected && provided === expected;
+      const ok =
+        mode === "subscribe" &&
+        token &&
+        process.env.VERIFY_TOKEN &&
+        token === process.env.VERIFY_TOKEN;
 
       if (ok) {
         console.log("WEBHOOK_VERIFIED");
-        return sendText(res, 200, challenge || "");
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        return res.status(200).send(challenge || "");
       }
 
       console.warn("WEBHOOK_VERIFY_DENIED", {
         mode,
         tokenPresent: !!token,
         envVerifyPresent: !!process.env.VERIFY_TOKEN,
-        tokenMatched: !!expected && provided === expected,
       });
 
-      return sendText(res, 403, "Forbidden");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(403).send("Forbidden");
     }
 
+    // ----------------------------
     // 2) Incoming events (POST)
+    // ----------------------------
     if (req.method === "POST") {
       const body = await getBody(req);
 
       console.log("META_WEBHOOK_POST_RECEIVED");
-      // During debug only — can be large
-      try {
-        console.log(JSON.stringify(body));
-      } catch {
-        console.log("BODY_UNSTRINGIFIABLE");
-      }
+      // Log a compact view first (safer than dumping massive payloads)
+      console.log(
+        JSON.stringify(
+          {
+            object: body?.object,
+            entryCount: Array.isArray(body?.entry) ? body.entry.length : 0,
+          },
+          null,
+          2
+        )
+      );
+
+      // If you want the FULL payload while debugging, uncomment:
+      // console.log(JSON.stringify(body));
+
+      const tasks = [];
 
       if (body?.object === "page") {
         for (const entry of body.entry || []) {
@@ -61,99 +77,85 @@ export default async function handler(req, res) {
             // Ignore echoes sent by the page (prevents loops)
             if (evt?.message?.is_echo) continue;
 
-            const text = evt?.message?.text;
+            // Accept text OR postback titles/payloads (so you can see something)
+            const text =
+              evt?.message?.text ||
+              evt?.postback?.title ||
+              evt?.postback?.payload;
 
-            // Ignore non-text events (delivery/read/attachments/etc.)
             if (!psid || !text) continue;
 
-            const reply = `✅ Connected. You said: "${text}"`;
-            await sendMessengerText(psid, reply);
+            const reply = `✅ Connected. You said: "${String(text)}"`;
+
+            // Queue sends (parallel)
+            tasks.push(sendMessengerText(psid, reply));
           }
         }
       } else {
         console.log("NON_PAGE_WEBHOOK_OBJECT", body?.object);
       }
 
-      return sendText(res, 200, "EVENT_RECEIVED");
+      // Run sends but don't crash the webhook if one send fails
+      if (tasks.length) {
+        const results = await Promise.allSettled(tasks);
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed) console.warn("SEND_BATCH_PARTIAL_FAILURES", { failed });
+      } else {
+        console.log("NO_SEND_TASKS_CREATED");
+      }
+
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send("EVENT_RECEIVED");
     }
 
-    // 3) Anything else
+    // ----------------------------
+    // 3) Method not allowed
+    // ----------------------------
     res.setHeader("Allow", "GET, POST");
-    return sendText(res, 405, "Method Not Allowed");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.status(405).send("Method Not Allowed");
   } catch (err) {
     console.error("WEBHOOK_FATAL_ERROR", err);
-    // Always respond something (prevents function hanging)
-    return sendText(res, 500, "Internal Server Error");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.status(500).send("Internal Server Error");
   }
 }
 
-/**
- * Send a plain text response (Vercel/Next safe — no Express-only methods).
- */
-function sendText(res, statusCode, text) {
-  res.statusCode = statusCode;
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.end(typeof text === "string" ? text : String(text ?? ""));
+// ----------------------------
+// Helpers
+// ----------------------------
+
+function pickQuery(req, key) {
+  const v = req?.query?.[key];
+  if (Array.isArray(v)) return v[0];
+  return v;
 }
 
-/**
- * Robust query parsing across runtimes.
- */
-function getQuery(req) {
-  // If runtime provides req.query (common on Vercel/Next), use it.
-  if (req.query && typeof req.query === "object") return req.query;
-
-  // Fallback: parse from URL
-  const url = safeURL(req.url);
-  const out = {};
-  for (const [k, v] of url.searchParams.entries()) out[k] = v;
-  return out;
-}
-
-function safeURL(maybePath) {
-  try {
-    return new URL(maybePath || "/", "http://localhost");
-  } catch {
-    return new URL("/", "http://localhost");
-  }
-}
-
-/**
- * Robust body parsing:
- * - Uses req.body if already parsed
- * - Otherwise reads raw stream and attempts JSON parse
- */
 async function getBody(req) {
-  if (req.body !== undefined) {
-    // Some runtimes give string bodies; normalize
-    if (typeof req.body === "string") {
-      try {
-        return JSON.parse(req.body);
-      } catch {
-        return req.body;
-      }
+  // Next.js usually parses JSON into req.body automatically.
+  // But if bodyParser is off or something odd happens, fall back to raw stream.
+  if (req.body && typeof req.body === "object") return req.body;
+
+  // If body is a string, try JSON parse
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
     }
-    return req.body;
   }
 
   // Raw stream fallback
-  const raw = await readRawBody(req);
-  if (!raw) return {};
-
   try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    if (!raw) return {};
     return JSON.parse(raw);
-  } catch {
-    return raw;
+  } catch (e) {
+    console.warn("BODY_PARSE_FALLBACK_FAILED");
+    return {};
   }
-}
-
-function readRawBody(req) {
-  return new Promise((resolve) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => resolve(data));
-    req.on("error", () => resolve(""));
-  });
 }
 
 async function sendMessengerText(psid, text) {
@@ -164,24 +166,21 @@ async function sendMessengerText(psid, text) {
     return;
   }
 
-  const graphVersion = process.env.GRAPH_VERSION || "v25.0";
-  const url = `https://graph.facebook.com/${graphVersion}/me/messages?access_token=${encodeURIComponent(
+  const url = `https://graph.facebook.com/v25.0/me/messages?access_token=${encodeURIComponent(
     token
   )}`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const payload = {
+    messaging_type: "RESPONSE",
+    recipient: { id: psid },
+    message: { text },
+  };
 
   try {
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        messaging_type: "RESPONSE",
-        recipient: { id: psid },
-        message: { text },
-      }),
+      body: JSON.stringify(payload),
     });
 
     const data = await resp.json().catch(() => ({}));
@@ -192,8 +191,6 @@ async function sendMessengerText(psid, text) {
       console.log("SEND_API_OK", data);
     }
   } catch (err) {
-    console.error("SEND_API_FATAL", err?.name || err, err);
-  } finally {
-    clearTimeout(timeout);
+    console.error("SEND_API_FETCH_FAILED", err);
   }
 }
