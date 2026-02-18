@@ -1,43 +1,47 @@
 export default async function handler(req, res) {
-  try {
-    console.log("WEBHOOK_VERSION", "2026-02-18_FIXED");
-    console.log("WEBHOOK_HIT", req.method, req.url);
+  res.setHeader("Cache-Control", "no-store");
+  console.log("WEBHOOK_VERSION", "2026-02-18_FIXED");
+  console.log("WEBHOOK_HIT", req.method, req.url);
 
-    // ----------------------------
-    // 1️⃣ META VERIFICATION (GET)
-    // ----------------------------
-    if (req.method === "GET") {
-      const mode = req.query["hub.mode"];
-      const token = req.query["hub.verify_token"];
-      const challenge = req.query["hub.challenge"];
+  // ===============================
+  // 1) META VERIFICATION (GET)
+  // ===============================
+  if (req.method === "GET") {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
 
-      const ok =
-        mode === "subscribe" &&
-        token &&
-        process.env.VERIFY_TOKEN &&
-        token === process.env.VERIFY_TOKEN;
+    const ok =
+      mode === "subscribe" &&
+      token &&
+      process.env.VERIFY_TOKEN &&
+      token === process.env.VERIFY_TOKEN;
 
-      if (ok) {
-        console.log("WEBHOOK_VERIFIED");
-        return res.status(200).send(challenge);
-      }
+    if (ok) {
+      console.log("WEBHOOK_VERIFIED");
 
-      console.warn("WEBHOOK_VERIFY_DENIED", {
-        mode,
-        tokenPresent: !!token,
-        envVerifyPresent: !!process.env.VERIFY_TOKEN,
-      });
-
-      return res.status(403).send("Forbidden");
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/plain");
+      return res.end(challenge);
     }
 
-    // ----------------------------
-    // 2️⃣ INCOMING EVENTS (POST)
-    // ----------------------------
-    if (req.method === "POST") {
-      console.log("META_WEBHOOK_POST_RECEIVED");
+    console.warn("WEBHOOK_VERIFY_DENIED", {
+      mode,
+      tokenPresent: !!token,
+      envVerifyPresent: !!process.env.VERIFY_TOKEN,
+    });
 
+    res.statusCode = 403;
+    return res.end("Forbidden");
+  }
+
+  // ===============================
+  // 2) INCOMING EVENTS (POST)
+  // ===============================
+  if (req.method === "POST") {
+    try {
       const body = req.body;
+      console.log("META_WEBHOOK_POST_RECEIVED");
       console.log(JSON.stringify(body));
 
       if (body?.object === "page") {
@@ -45,7 +49,7 @@ export default async function handler(req, res) {
           for (const evt of entry.messaging || []) {
             const psid = evt?.sender?.id;
 
-            // Ignore echoes (prevents loops)
+            // Ignore echoes
             if (evt?.message?.is_echo) continue;
 
             const text = evt?.message?.text;
@@ -60,32 +64,32 @@ export default async function handler(req, res) {
         console.log("NON_PAGE_WEBHOOK_OBJECT", body?.object);
       }
 
-      return res.status(200).send("EVENT_RECEIVED");
+      res.statusCode = 200;
+      return res.end("EVENT_RECEIVED");
+    } catch (err) {
+      console.error("WEBHOOK_POST_ERROR", err);
+      res.statusCode = 500;
+      return res.end("ERROR");
     }
-
-    // ----------------------------
-    // 3️⃣ METHOD NOT ALLOWED
-    // ----------------------------
-    return res.status(405).send("Method Not Allowed");
-  } catch (err) {
-    console.error("WEBHOOK_FATAL_ERROR", err);
-    return res.status(500).send("Internal Server Error");
   }
+
+  res.statusCode = 405;
+  return res.end("Method Not Allowed");
 }
 
 async function sendMessengerText(psid, text) {
+  const token = process.env.PAGE_ACCESS_TOKEN;
+
+  if (!token) {
+    console.error("MISSING_PAGE_ACCESS_TOKEN");
+    return;
+  }
+
+  const url = `https://graph.facebook.com/v24.0/me/messages?access_token=${encodeURIComponent(
+    token
+  )}`;
+
   try {
-    const token = process.env.PAGE_ACCESS_TOKEN;
-
-    if (!token) {
-      console.error("MISSING_PAGE_ACCESS_TOKEN");
-      return;
-    }
-
-    const url = `https://graph.facebook.com/v24.0/me/messages?access_token=${encodeURIComponent(
-      token
-    )}`;
-
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -104,6 +108,6 @@ async function sendMessengerText(psid, text) {
       console.log("SEND_API_OK", data);
     }
   } catch (err) {
-    console.error("SEND_MESSAGE_FATAL_ERROR", err);
+    console.error("SEND_API_EXCEPTION", err);
   }
 }
