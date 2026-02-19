@@ -56,9 +56,15 @@ const UPH_PRICES = { loveseat:100, recliner:80, ottoman:50, "dining chair":25, s
    3) run the SAME conversation core
    4) send reply via Graph API (Send API)
 =============================================================================== */
-const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN || "";
-const FB_VERIFY_TOKEN      = process.env.FB_VERIFY_TOKEN      || "switchboard_verify_123";
-const FB_APP_SECRET        = process.env.FB_APP_SECRET        || "";
+const FB_PAGE_ACCESS_TOKEN =
+  process.env.PAGE_ACCESS_TOKEN || process.env.FB_PAGE_ACCESS_TOKEN || "";
+
+const FB_VERIFY_TOKEN =
+  process.env.VERIFY_TOKEN || process.env.FB_VERIFY_TOKEN || "switchboard_verify_123";
+
+const FB_APP_SECRET =
+  process.env.APP_SECRET || process.env.FB_APP_SECRET || "";
+
 
 // Optional: Vercel KV persistence (recommended). If not installed/configured, falls back to in-memory.
 let kv = null;
