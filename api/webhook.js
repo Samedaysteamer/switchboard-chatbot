@@ -11,7 +11,8 @@ let _chatHandlerPromise = null;
 
 async function getChatHandler() {
   if (!_chatHandlerPromise) {
-    _chatHandlerPromise = import("./chat").then((m) => m.default || m);
+    // ✅ IMPORTANT: Explicit extension to avoid ERR_MODULE_NOT_FOUND on Vercel ESM
+    _chatHandlerPromise = import("./chat.js").then((m) => m.default || m);
   }
   const handler = await _chatHandlerPromise;
   if (typeof handler !== "function") {
@@ -56,7 +57,7 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   normalizeEnv();
 
-  console.log("WEBHOOK_VERSION", "2026-02-18_webhook_delegate_v2");
+  console.log("WEBHOOK_VERSION", "2026-02-19_webhook_delegate_v3_extfix");
   console.log("WEBHOOK_HIT", req.method, req.url);
 
   // =========================
@@ -97,7 +98,6 @@ export default async function handler(req, res) {
   // =========================
   if (req.method === "POST") {
     try {
-      // Breadcrumb: confirms Meta is actually posting here
       if (req.body?.object) console.log("WEBHOOK_POST_OBJECT", req.body.object);
 
       const chatHandler = await getChatHandler();
@@ -118,3 +118,4 @@ export default async function handler(req, res) {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   return res.status(405).send("Method Not Allowed");
 }
+
