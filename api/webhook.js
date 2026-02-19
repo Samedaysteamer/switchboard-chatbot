@@ -1,71 +1,63 @@
-// pages/api/webhook.js
+// /api/webhook.js
 // Same Day Steamerz — Meta Messenger Webhook entrypoint (FULL)
+//
 // Purpose:
 // 1) Handle Meta verification (GET hub.*)
-// 2) Return OK when you open it in a browser (GET without hub.*)
-// 3) Receive Meta events (POST)
-// 4) Normalize env var names so chat.js works with whatever you currently have in Vercel
-// 5) Delegate ALL event handling + Messenger replies to ./chat.js (single source of truth)
+// 2) Return OK when opened in browser (GET without hub.*)
+// 3) Receive Meta events (POST) and delegate ALL handling to ./chat.js
+// 4) Normalize env var names so chat.js works no matter which naming you used
 
 let _chatHandlerPromise = null;
 
-function normalizeEnvForChatJS() {
-  // Canonical names we want everywhere:
-  //   FB_PAGE_ACCESS_TOKEN
-  //   FB_VERIFY_TOKEN
-  //   FB_APP_SECRET
-  //
-  // But if you already have older names in Vercel, map them forward automatically.
+async function getChatHandler() {
+  if (!_chatHandlerPromise) {
+    _chatHandlerPromise = import("./chat").then((m) => m.default || m);
+  }
+  const handler = await _chatHandlerPromise;
+  if (typeof handler !== "function") {
+    throw new Error("CHAT_HANDLER_NOT_FUNCTION");
+  }
+  return handler;
+}
 
+function normalizeEnv() {
+  // Access token compatibility
+  if (!process.env.PAGE_ACCESS_TOKEN && process.env.FB_PAGE_ACCESS_TOKEN) {
+    process.env.PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
+  }
   if (!process.env.FB_PAGE_ACCESS_TOKEN && process.env.PAGE_ACCESS_TOKEN) {
     process.env.FB_PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
   }
 
+  // Verify token compatibility
+  if (!process.env.VERIFY_TOKEN && process.env.FB_VERIFY_TOKEN) {
+    process.env.VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
+  }
   if (!process.env.FB_VERIFY_TOKEN && process.env.VERIFY_TOKEN) {
     process.env.FB_VERIFY_TOKEN = process.env.VERIFY_TOKEN;
   }
 
-  if (!process.env.FB_APP_SECRET && process.env.APP_SECRET) {
-    process.env.FB_APP_SECRET = process.env.APP_SECRET;
-  }
-
-  // Also support the reverse (in case some file still reads old names)
-  if (!process.env.PAGE_ACCESS_TOKEN && process.env.FB_PAGE_ACCESS_TOKEN) {
-    process.env.PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
-  }
-
-  if (!process.env.VERIFY_TOKEN && process.env.FB_VERIFY_TOKEN) {
-    process.env.VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
-  }
-
+  // App secret compatibility (optional)
   if (!process.env.APP_SECRET && process.env.FB_APP_SECRET) {
     process.env.APP_SECRET = process.env.FB_APP_SECRET;
   }
+  if (!process.env.FB_APP_SECRET && process.env.APP_SECRET) {
+    process.env.FB_APP_SECRET = process.env.APP_SECRET;
+  }
 }
 
-async function getChatHandler() {
-  if (!_chatHandlerPromise) {
-    // IMPORTANT:
-    // chat.js is CommonJS (module.exports). Dynamic import returns it under .default.
-    _chatHandlerPromise = import("./chat").then((m) => m.default || m);
-  }
-  return _chatHandlerPromise;
+function hasHubParams(query) {
+  return Boolean(
+    query?.["hub.mode"] || query?.["hub.verify_token"] || query?.["hub.challenge"]
+  );
 }
 
 export default async function handler(req, res) {
-  // Never cache webhook responses
   res.setHeader("Cache-Control", "no-store");
+  normalizeEnv();
 
-  // Normalize env BEFORE chat.js loads so its module-scope constants see the mapped names
-  normalizeEnvForChatJS();
-
-  console.log("WEBHOOK_ROUTE", "/api/webhook");
+  console.log("WEBHOOK_VERSION", "2026-02-18_webhook_delegate_v2");
   console.log("WEBHOOK_HIT", req.method, req.url);
-  console.log("ENV_PRESENT", {
-    FB_PAGE_ACCESS_TOKEN: !!process.env.FB_PAGE_ACCESS_TOKEN,
-    FB_VERIFY_TOKEN: !!process.env.FB_VERIFY_TOKEN,
-    FB_APP_SECRET: !!process.env.FB_APP_SECRET,
-  });
 
   // =========================
   // 1) Meta verify (GET)
@@ -75,24 +67,14 @@ export default async function handler(req, res) {
     const token = req.query?.["hub.verify_token"];
     const challenge = req.query?.["hub.challenge"];
 
-    const hasVerifyParams = !!(mode || token || challenge);
-
-    // If YOU open /api/webhook in the browser (no hub params)
-    if (!hasVerifyParams) {
+    // If YOU open /api/webhook in browser (no hub params)
+    if (!hasHubParams(req.query)) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.status(200).send("OK");
     }
 
-    const expectedVerify =
-      process.env.FB_VERIFY_TOKEN ||
-      process.env.VERIFY_TOKEN ||
-      "";
-
-    const ok =
-      mode === "subscribe" &&
-      token &&
-      expectedVerify &&
-      token === expectedVerify;
+    const expected = process.env.VERIFY_TOKEN || process.env.FB_VERIFY_TOKEN || "";
+    const ok = mode === "subscribe" && token && expected && token === expected;
 
     if (ok) {
       console.log("WEBHOOK_VERIFIED");
@@ -103,7 +85,7 @@ export default async function handler(req, res) {
     console.warn("WEBHOOK_VERIFY_DENIED", {
       mode,
       tokenPresent: !!token,
-      expectedPresent: !!expectedVerify,
+      expectedPresent: !!expected,
     });
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -115,17 +97,15 @@ export default async function handler(req, res) {
   // =========================
   if (req.method === "POST") {
     try {
-      // Delegate ALL logic to chat.js
-      // chat.js already contains:
-      // - direct Meta webhook support (object:"page")
-      // - Send API reply
-      // - ManyChat + Web widget handling
-      const chatHandler = await getChatHandler();
-      return chatHandler(req, res);
-    } catch (err) {
-      console.error("WEBHOOK_DELEGATE_ERROR", err);
+      // Breadcrumb: confirms Meta is actually posting here
+      if (req.body?.object) console.log("WEBHOOK_POST_OBJECT", req.body.object);
 
-      // Still return 200 so Meta doesn't keep retrying
+      const chatHandler = await getChatHandler();
+      return await chatHandler(req, res);
+    } catch (err) {
+      console.error("WEBHOOK_HANDLER_ERROR", err);
+
+      // Always 200 so Meta doesn't retry forever while debugging
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.status(200).send("EVENT_RECEIVED");
     }
