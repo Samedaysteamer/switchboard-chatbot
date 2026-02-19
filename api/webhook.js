@@ -4,42 +4,68 @@
 // 1) Handle Meta verification (GET hub.*)
 // 2) Return OK when you open it in a browser (GET without hub.*)
 // 3) Receive Meta events (POST)
-// 4) Normalize env var names so chat.js works with your current Vercel variables
+// 4) Normalize env var names so chat.js works with whatever you currently have in Vercel
 // 5) Delegate ALL event handling + Messenger replies to ./chat.js (single source of truth)
 
 let _chatHandlerPromise = null;
 
+function normalizeEnvForChatJS() {
+  // Canonical names we want everywhere:
+  //   FB_PAGE_ACCESS_TOKEN
+  //   FB_VERIFY_TOKEN
+  //   FB_APP_SECRET
+  //
+  // But if you already have older names in Vercel, map them forward automatically.
+
+  if (!process.env.FB_PAGE_ACCESS_TOKEN && process.env.PAGE_ACCESS_TOKEN) {
+    process.env.FB_PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+  }
+
+  if (!process.env.FB_VERIFY_TOKEN && process.env.VERIFY_TOKEN) {
+    process.env.FB_VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+  }
+
+  if (!process.env.FB_APP_SECRET && process.env.APP_SECRET) {
+    process.env.FB_APP_SECRET = process.env.APP_SECRET;
+  }
+
+  // Also support the reverse (in case some file still reads old names)
+  if (!process.env.PAGE_ACCESS_TOKEN && process.env.FB_PAGE_ACCESS_TOKEN) {
+    process.env.PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
+  }
+
+  if (!process.env.VERIFY_TOKEN && process.env.FB_VERIFY_TOKEN) {
+    process.env.VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
+  }
+
+  if (!process.env.APP_SECRET && process.env.FB_APP_SECRET) {
+    process.env.APP_SECRET = process.env.FB_APP_SECRET;
+  }
+}
+
 async function getChatHandler() {
   if (!_chatHandlerPromise) {
+    // IMPORTANT:
+    // chat.js is CommonJS (module.exports). Dynamic import returns it under .default.
     _chatHandlerPromise = import("./chat").then((m) => m.default || m);
   }
   return _chatHandlerPromise;
 }
 
-function normalizeEnvForChatJS() {
-  // chat.js expects FB_* names, but your Vercel env currently uses PAGE_ACCESS_TOKEN + VERIFY_TOKEN.
-  if (!process.env.FB_PAGE_ACCESS_TOKEN && process.env.PAGE_ACCESS_TOKEN) {
-    process.env.FB_PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-  }
-  if (!process.env.FB_VERIFY_TOKEN && process.env.VERIFY_TOKEN) {
-    process.env.FB_VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-  }
-
-  // Optional: if you ever store the app secret under APP_SECRET, map it too.
-  if (!process.env.FB_APP_SECRET && process.env.APP_SECRET) {
-    process.env.FB_APP_SECRET = process.env.APP_SECRET;
-  }
-}
-
 export default async function handler(req, res) {
-  // Never cache webhooks
+  // Never cache webhook responses
   res.setHeader("Cache-Control", "no-store");
 
-  console.log("WEBHOOK_VERSION", "2026-02-18_full_envmap_delegate_v1");
-  console.log("WEBHOOK_HIT", req.method, req.url);
-
-  // Ensure chat.js sees the variable names it expects
+  // Normalize env BEFORE chat.js loads so its module-scope constants see the mapped names
   normalizeEnvForChatJS();
+
+  console.log("WEBHOOK_ROUTE", "/api/webhook");
+  console.log("WEBHOOK_HIT", req.method, req.url);
+  console.log("ENV_PRESENT", {
+    FB_PAGE_ACCESS_TOKEN: !!process.env.FB_PAGE_ACCESS_TOKEN,
+    FB_VERIFY_TOKEN: !!process.env.FB_VERIFY_TOKEN,
+    FB_APP_SECRET: !!process.env.FB_APP_SECRET,
+  });
 
   // =========================
   // 1) Meta verify (GET)
@@ -58,7 +84,9 @@ export default async function handler(req, res) {
     }
 
     const expectedVerify =
-      process.env.FB_VERIFY_TOKEN || process.env.VERIFY_TOKEN || "";
+      process.env.FB_VERIFY_TOKEN ||
+      process.env.VERIFY_TOKEN ||
+      "";
 
     const ok =
       mode === "subscribe" &&
@@ -87,11 +115,11 @@ export default async function handler(req, res) {
   // =========================
   if (req.method === "POST") {
     try {
-      // Delegate to chat.js (it handles:
-      // - object:"page" events
-      // - PSID state
+      // Delegate ALL logic to chat.js
+      // chat.js already contains:
+      // - direct Meta webhook support (object:"page")
       // - Send API reply
-      // - ManyChat/web flow)
+      // - ManyChat + Web widget handling
       const chatHandler = await getChatHandler();
       return chatHandler(req, res);
     } catch (err) {
