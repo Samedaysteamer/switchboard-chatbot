@@ -1,10 +1,10 @@
 // Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
 // - Keeps existing ManyChat + Web widget behavior
 // - Adds DIRECT Meta Messenger Webhook support (object:"page") with PSID state persistence + Send API replies
-// - ALWAYS includes state (object) AND state_json (string) for ManyChat mapping
+// - Always includes state (object) AND state_json (string) for ManyChat mapping
 // - Adds reply_text (string) so you can map the next prompt into a text block
 // - Safe input extraction + ManyChat v2 auto-wrapper (Messenger)
-// - Time window step: NO multiple-choice; customer TYPES "8-12" or "1-5" (accepts many formats)
+// - Fallback: if user typed but state.step missing, jump to choose_service
 
 /* ========================= Utilities ========================= */
 const crypto = require("crypto");
@@ -41,34 +41,6 @@ const isQuestion = (t = "") => {
   return /\?$/.test(s) || /^(what|when|how|who|where|why|do|does|can|is|are|should|could|would|am i|are y)\b/i.test(s);
 };
 
-// Normalize dashes + spacing for safer comparisons
-function normalizeText(s = "") {
-  return String(s || "")
-    .replace(/[–—]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Parse typed arrival window (NO quick replies)
-function parseArrivalWindow(input = "") {
-  const t = normalizeText(input).toLowerCase();
-
-  // strip punctuation except dash
-  const clean = t.replace(/[^\w\s:-]/g, "").replace(/\s+/g, " ").trim();
-
-  // 8-12 patterns
-  if (/(^| )8(:00)?\s*(am)?\s*(to|-)\s*12(:00)?\s*(pm)?($| )/.test(clean)) return "8-12";
-  if (/^8\s*-\s*12$/.test(clean)) return "8-12";
-  if (/^8\s*to\s*12$/.test(clean)) return "8-12";
-
-  // 1-5 patterns
-  if (/(^| )1(:00)?\s*(pm)?\s*(to|-)\s*5(:00)?\s*(pm)?($| )/.test(clean)) return "1-5";
-  if (/^1\s*-\s*5$/.test(clean)) return "1-5";
-  if (/^1\s*to\s*5$/.test(clean)) return "1-5";
-
-  return null;
-}
-
 /* ========================= Data ========================= */
 let validZipCodes = null;
 try { validZipCodes = require("../zips.js").validZipCodes || null; } catch { /* optional */ }
@@ -76,8 +48,8 @@ try { validZipCodes = require("../zips.js").validZipCodes || null; } catch { /* 
 const SERVICE_CHOICES = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
 const UPH_CHOICES = ["Sectional", "Sofa", "Loveseat", "Recliner", "Ottoman", "Dining chair", "Mattress"];
 
-// TIME WINDOWS (typed only)
-const TIME_WINDOWS_TYPED = ["8-12", "1-5"];
+// UPDATED: add optional late window
+const TIME_WINDOWS = ["8 AM–12 PM", "1 PM–5 PM", "3 PM–7 PM"];
 
 const UPH_PRICES = { loveseat: 100, recliner: 80, ottoman: 50, "dining chair": 25, sofa: 150, mattress: 150 };
 
@@ -415,6 +387,7 @@ function priceUphFromItems(items) {
       const count = it.count || 1;
       total += each * count;
 
+      // Optional cushion context for single sofa/loveseat
       if ((it.type === "sofa" || it.type === "loveseat") && it.seats && count === 1) {
         breakdown.push(`${it.type} (${it.seats} cushion${it.seats > 1 ? "s" : ""})`);
       } else {
@@ -460,6 +433,7 @@ function formatPhone(digits) {
     : (digits || "");
 }
 
+// UPDATED: removed dispatcher phone from summary
 function bookingSummary(state) {
   const parts = [];
   if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -591,6 +565,7 @@ function applySmartCorrections(user, state) {
   if (!user || typeof user !== "string") return null;
   const t = user.toLowerCase();
 
+  // phone override
   if (/(phone|number|override|update)/.test(t)) {
     const digits = (user.match(/\d/g) || []).join("");
     if (digits.length === 10) {
@@ -599,6 +574,7 @@ function applySmartCorrections(user, state) {
     }
   }
 
+  // House/Apartment shortcuts only when on that step
   if (state.step === "collect_building" && /\bhouse\b/.test(t)) {
     state.building = "House";
     state.step = "collect_notes";
@@ -611,6 +587,7 @@ function applySmartCorrections(user, state) {
     return { reply: "What floor is the apartment on? (1, 2, 3, or 4+)", quickReplies: ["1", "2", "3", "4"] };
   }
 
+  // floor handler
   if (state.step === "collect_floor") {
     const fl = numFromText(t);
     if (!fl) {
@@ -626,7 +603,7 @@ function applySmartCorrections(user, state) {
     return { reply: "Do you have any notes or special instructions?", quickReplies: ["Yes, I have notes", "No, continue"] };
   }
 
-  // Dynamic carpet tweaks (unchanged)
+  // dynamic carpet tweaks (unchanged logic; fixed syntax)
   if (state.carpet && state.carpet.detail) {
     const d = { rooms: 0, halls: 0, stairs: 0, extras: 0, rugs: 0, ...state.carpet.detail };
     let changed = false;
@@ -645,14 +622,33 @@ function applySmartCorrections(user, state) {
     if (remH) { d.halls = Math.max(0, d.halls - Math.max(1, numFromText(remH[2] || "1"))); changed = true; }
 
     const addS = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:stairs?|flights?)\b/);
-    if (addS) { d.stairs += Math.max(1, numFromText(addS[1] || "1"))); changed = true; }
+    if (addS) { d.stairs += Math.max(1, numFromText(addS[1] || "1")); changed = true; }
     const remS = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:stairs?|flights?)\b/);
     if (remS) { d.stairs = Math.max(0, d.stairs - Math.max(1, numFromText(remS[2] || "1"))); changed = true; }
 
     const addR = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:area\s*)?rugs?\b/);
-    if (addR) { d.rugs += Math.max(1, numFromText(addR[1] || "1"))); changed = true; }
+    if (addR) { d.rugs += Math.max(1, numFromText(addR[1] || "1")); changed = true; }
     const remR = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:area\s*)?rugs?\b/);
     if (remR) { d.rugs = Math.max(0, d.rugs - Math.max(1, numFromText(remR[2] || "1"))); changed = true; }
+
+    if (!changed) {
+      let m, lastRooms = null, lastHalls = null, lastStairs = null, lastRugs = null;
+      const setRoomsRx = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*rooms?\b/g;
+      while ((m = setRoomsRx.exec(t))) lastRooms = m[1];
+      if (lastRooms != null) { d.rooms = Math.max(0, numFromText(lastRooms)); changed = true; }
+
+      const setHallsRx = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*hall(?:way|ways)?\b/g;
+      while ((m = setHallsRx.exec(t))) lastHalls = m[1];
+      if (lastHalls != null) { d.halls = Math.max(0, numFromText(lastHalls)); changed = true; }
+
+      const setStairsRx = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:stairs?|flights?)\b/g;
+      while ((m = setStairsRx.exec(t))) lastStairs = m[1];
+      if (lastStairs != null) { d.stairs = Math.max(0, numFromText(lastStairs)); changed = true; }
+
+      const setRugsRx = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:area\s*)?rugs?\b/g;
+      while ((m = setRugsRx.exec(t))) lastRugs = m[1];
+      if (lastRugs != null) { d.rugs = Math.max(0, numFromText(lastRugs)); changed = true; }
+    }
 
     if (changed) {
       state.carpet = computeCarpetTotals(d);
@@ -801,7 +797,7 @@ function repromptForStep(state = {}) {
     case "collect_date":
       return { reply: "What day would you like the cleaning? (e.g., July 10 or 07/10)", state };
     case "collect_window":
-      return { reply: "Type your arrival window: **8-12** or **1-5**.", state };
+      return { reply: "Pick a time window:", quickReplies: TIME_WINDOWS, state };
     case "collect_pets":
       return { reply: "Any pets we should know about?", quickReplies: ["Yes", "No"], state };
     case "collect_water":
@@ -824,6 +820,7 @@ async function handleCorePOST(req, res) {
   try {
     const body = req.body || {};
 
+    // Accept ManyChat + Web inputs (text/click/payload)
     const userRaw =
       (typeof body.text === "string" && body.text) ||
       (typeof body.message === "string" && body.message) ||
@@ -836,11 +833,13 @@ async function handleCorePOST(req, res) {
     const user = String(userRaw || "").trim();
     const msg = user.toLowerCase();
 
+    // Accept state as object or JSON string
     let state = body.state ?? {};
     if (typeof state === "string") {
       try { state = JSON.parse(state); } catch { state = {}; }
     }
 
+    // Recover state from state_json if state is empty or invalid
     if (
       (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
       typeof body.state_json === "string" &&
@@ -852,6 +851,7 @@ async function handleCorePOST(req, res) {
     if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
     if (!Array.isArray(state.faqLog)) state.faqLog = [];
 
+    // ---- Step recovery from last prompt (ManyChat fallback) ----
     const last =
       (typeof body.last === "string" && body.last) ||
       (typeof body.last_reply === "string" && body.last_reply) ||
@@ -864,13 +864,15 @@ async function handleCorePOST(req, res) {
       else if (/air duct cleaning — what you get|choose a package|basic|deep/.test(l)) state.step = "duct_package";
       else if (/how many hvac systems/.test(l)) state.step = "duct_systems";
       else if (/what day would you like the cleaning/.test(l)) state.step = "collect_date";
-      else if (/arrival window|time frame|type your arrival window|8-12|1-5/.test(l)) state.step = "collect_window";
+      else if (/which time frame works|pick a time window/.test(l)) state.step = "collect_window";
       else if (/do you have any notes|special instructions/.test(l)) state.step = "collect_notes";
     }
 
+    // Detect ManyChat origin and auto-wrap as v2
     const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
     const originalJson = res.json.bind(res);
 
+    // === SAFE WRAPPER (works for BOTH Web + ManyChat) ===
     res.json = (data) => {
       try {
         let out = (data == null) ? {} : (typeof data === "string" ? { reply: data } : { ...data });
@@ -895,29 +897,35 @@ async function handleCorePOST(req, res) {
       }
     };
 
+    // Initial entry (button click / test) → intro
     if (body.init || (!user && !state.step)) {
       return res.status(200).json(intro());
     }
 
+    // Timeout follow-up guard
     if (state._followUpArmed && state._followUpDueAt && Date.now() >= state._followUpDueAt && state.step !== "collect_notes") {
       await sendSessionIfEligible(state, "timeout");
       disarmFollowUp(state);
     }
 
+    // If we got user text but state missing, fall into choose_service
     if (!state.step && user) {
       return res.status(200).json(intro());
     }
 
+    // If we got no user text but have a step, just re-prompt the current step
     if (!user) {
       return res.status(200).json(repromptForStep(state));
     }
 
+    // Smart corrections FIRST
     const correctionReply = applySmartCorrections(user, state);
     if (correctionReply) {
       if (typeof correctionReply === "string") return res.status(200).json({ reply: correctionReply, state });
       return res.status(200).json({ ...correctionReply, state });
     }
 
+    // FAQ at any time
     const incomingQuestion = body.intent === "faq" ? (body.question || user) : (isQuestion(user) ? user : null);
     if (incomingQuestion) {
       const ans = answerFAQ(incomingQuestion);
@@ -927,6 +935,7 @@ async function handleCorePOST(req, res) {
       }
     }
 
+    /* ---------------- Router ---------------- */
     function preBookingSummary(state) {
       const parts = [];
       if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -1018,6 +1027,7 @@ Proceed with booking?`;
       }
 
       case "upholstery_details": {
+        // Cushion follow-up for sofa/loveseat if no number was provided
         if (/\bsofa\b/i.test(user) && !/\d/.test(user)) {
           state.step = "upholstery_cushions";
           state._cushionTarget = "sofa";
@@ -1040,6 +1050,7 @@ Proceed with booking?`;
           });
         }
 
+        // If sectional mentioned but seats missing, ask seats next (before confirm)
         if (/\bsectional\b/i.test(user) && !/\d/.test(user)) {
           state.step = "upholstery_sectional_seats";
           return res.status(200).json({ reply: "For the sectional — how many seats/cushions?", quickReplies: ["3", "4", "5", "6", "7"], state });
@@ -1240,7 +1251,7 @@ Proceed with booking?`;
         const zip = zipMatch[1];
 
         if (validZipCodes && !validZipCodes.includes(zip)) {
-          state.address = normalizeText(user);
+          state.address = user.trim().replace(/\s{2,}/g, " ");
           state.zip = zip;
           state.step = "ooa_collect_phone";
           return res.status(200).json({
@@ -1252,7 +1263,7 @@ Proceed with booking?`;
           });
         }
 
-        state.address = normalizeText(user);
+        state.address = user.trim().replace(/\s{2,}/g, " ");
         state.Address = state.address;
         state.zip = zip;
         return res.status(200).json(promptName(state));
@@ -1338,23 +1349,12 @@ Proceed with booking?`;
         state.date = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
         state.step = "collect_window";
         refreshFollowUpIfEligible(state);
-
-        // NO quick replies here
-        return res.status(200).json({
-          reply: "What arrival window do you prefer? Type **8-12** or **1-5**.",
-          state
-        });
+        return res.status(200).json({ reply: "Which time frame works best for you?", quickReplies: TIME_WINDOWS, state });
       }
 
       case "collect_window": {
-        const win = parseArrivalWindow(user);
-        if (!win) {
-          return res.status(200).json({
-            reply: "Please type **8-12** (morning) or **1-5** (afternoon).",
-            state
-          });
-        }
-        state.window = win;
+        if (!TIME_WINDOWS.includes(user.trim())) return res.status(200).json({ reply: "Please pick one:", quickReplies: TIME_WINDOWS, state });
+        state.window = user.trim();
         state.step = "collect_pets";
         refreshFollowUpIfEligible(state);
         return res.status(200).json({ reply: "Are there any pets we should know about?", quickReplies: ["Yes", "No"], state });
@@ -1485,6 +1485,7 @@ Proceed with booking?`;
 
 /* ========================= MAIN EXPORT ========================= */
 module.exports = async (req, res) => {
+  // Messenger Webhook Verification (Meta + direct)
   if (req.method === "GET") {
     const mode = req.query?.["hub.mode"];
     const token = req.query?.["hub.verify_token"];
@@ -1500,6 +1501,8 @@ module.exports = async (req, res) => {
 
   const body = req.body || {};
 
+  // ===== DIRECT META WEBHOOK BRANCH =====
+  // Meta payload: { object:"page", entry:[{ messaging:[ ... ]}] }
   if (body && body.object === "page" && Array.isArray(body.entry)) {
     if (!verifyFBSignature(req)) return res.sendStatus(403);
 
@@ -1515,6 +1518,7 @@ module.exports = async (req, res) => {
         const incoming = extractMetaIncoming(evt);
         let storedState = (await getStateByPSID(psid)) || {};
 
+        // Run core logic using a fake req/res to capture output
         let captured = null;
 
         const fakeReq = {
@@ -1536,9 +1540,11 @@ module.exports = async (req, res) => {
 
         await handleCorePOST(fakeReq, fakeRes);
 
+        // Persist updated state
         const nextState = (captured && captured.state && typeof captured.state === "object") ? captured.state : storedState;
         await setStateByPSID(psid, nextState);
 
+        // Reply back to Messenger
         const replyText = (captured && (captured.reply_text || captured.reply))
           ? String(captured.reply_text || captured.reply)
           : "";
@@ -1552,14 +1558,16 @@ module.exports = async (req, res) => {
     return res.status(200).send("EVENT_RECEIVED");
   }
 
+  // ===== MANYCHAT + WEB BRANCH =====
   return handleCorePOST(req, res);
 };
 
 /* ========================= ZAP HANDLERS (form-encoded) ========================= */
 const fetch = global.fetch || require("node-fetch");
 
-const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/";
-const ZAPIER_SESSION_URL = "https://hooks.zapier.com/hooks/catch/3165661/u12ap8l/";
+// Your two Zap Webhooks:
+const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/"; // Booking Zap
+const ZAPIER_SESSION_URL = "https://hooks.zapier.com/hooks/catch/3165661/u12ap8l/"; // Session/Partial Zap
 
 async function sendBookingZapFormEncoded(payload) {
   try {
@@ -1575,6 +1583,7 @@ async function sendBookingZapFormEncoded(payload) {
 
 async function sendSessionZapFormEncoded(payload) {
   try {
+    // Only send if some contact info (guard stays)
     if (!payload.name2025 && !payload.phone2025 && !payload.email2025) return;
 
     await fetch(ZAPIER_SESSION_URL, {
