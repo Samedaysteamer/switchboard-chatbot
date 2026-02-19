@@ -48,8 +48,23 @@ try { validZipCodes = require("../zips.js").validZipCodes || null; } catch { /* 
 const SERVICE_CHOICES = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
 const UPH_CHOICES = ["Sectional", "Sofa", "Loveseat", "Recliner", "Ottoman", "Dining chair", "Mattress"];
 
-// UPDATED: add optional late window
-const TIME_WINDOWS = ["8 AM–12 PM", "1 PM–5 PM", "3 PM–7 PM"];
+// UPDATED (surgical): ONLY 2 arrival window quick replies to prevent looping
+const TIME_WINDOWS = ["8 to 12", "1 to 5"];
+
+// NEW (surgical): normalize common variants to our 2 canonical window strings
+function normalizeWindow(input = "") {
+  const t = String(input || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  // 8–12 variants (8 to 12, 8-12, 8am-12pm, 8 am to 12 pm, etc.)
+  if (/(^|\b)8\s*(?:am)?\s*(?:-|to|–)\s*12\s*(?:pm)?(\b|$)/.test(t)) return "8 to 12";
+  if (/\b8\s*to\s*12\b/.test(t)) return "8 to 12";
+
+  // 1–5 variants (1 to 5, 1-5, 1pm-5pm, 1 pm to 5 pm, etc.)
+  if (/(^|\b)1\s*(?:pm)?\s*(?:-|to|–)\s*5\s*(?:pm)?(\b|$)/.test(t)) return "1 to 5";
+  if (/\b1\s*to\s*5\b/.test(t)) return "1 to 5";
+
+  return "";
+}
 
 const UPH_PRICES = { loveseat: 100, recliner: 80, ottoman: 50, "dining chair": 25, sofa: 150, mattress: 150 };
 
@@ -1353,8 +1368,10 @@ Proceed with booking?`;
       }
 
       case "collect_window": {
-        if (!TIME_WINDOWS.includes(user.trim())) return res.status(200).json({ reply: "Please pick one:", quickReplies: TIME_WINDOWS, state });
-        state.window = user.trim();
+        // UPDATED (surgical): accept canonical windows + normalize common variants so validation never loops
+        const chosen = normalizeWindow(user) || user.trim();
+        if (!TIME_WINDOWS.includes(chosen)) return res.status(200).json({ reply: "Please pick one:", quickReplies: TIME_WINDOWS, state });
+        state.window = chosen;
         state.step = "collect_pets";
         refreshFollowUpIfEligible(state);
         return res.status(200).json({ reply: "Are there any pets we should know about?", quickReplies: ["Yes", "No"], state });
