@@ -10,12 +10,8 @@
 // 1) Correct ZIP import path (./zips.js first, fallback ../zips.js)
 // 2) Ask ZIP BEFORE address (collect_zip step)
 // 3) Validate with Set (fast + consistent)
-//
-// ✅ SURGICAL FIX #3 (ONLY):
-// Bundle discount: if Carpet + Upholstery via upsell → subtract $50 from combined total + Zap totals.
-// Does NOT change upholstery line-item pricing, only the total.
 
-/* ========================= Utilities ========================= */
+ /* ========================= Utilities ========================= */
 const crypto = require("crypto");
 
 const SMALL = {
@@ -50,7 +46,7 @@ const isQuestion = (t = "") => {
   return /\?$/.test(s) || /^(what|when|how|who|where|why|do|does|can|is|are|should|could|would|am i|are y)\b/i.test(s);
 };
 
-// ✅ ZIP helpers
+// ✅ ZIP helpers (new)
 function normalizeZip(input = "") {
   const m = String(input || "").match(/\b(\d{5})(?:-\d{4})?\b/);
   return m ? m[1] : "";
@@ -81,9 +77,10 @@ function zipInArea(zip) {
 const SERVICE_CHOICES = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
 const UPH_CHOICES = ["Sectional", "Sofa", "Loveseat", "Recliner", "Ottoman", "Dining chair", "Mattress"];
 
-// ONLY 2 arrival window quick replies to prevent looping
+// UPDATED (surgical): ONLY 2 arrival window quick replies to prevent looping
 const TIME_WINDOWS = ["8 to 12", "1 to 5"];
 
+// NEW (surgical): normalize common variants to our 2 canonical window strings
 function normalizeWindow(input = "") {
   const t = String(input || "").toLowerCase().replace(/\s+/g, " ").trim();
 
@@ -97,20 +94,6 @@ function normalizeWindow(input = "") {
 }
 
 const UPH_PRICES = { loveseat: 100, recliner: 80, ottoman: 50, "dining chair": 25, sofa: 150, mattress: 150 };
-
-/* ========================= FIX #3 — Bundle Discount =========================
-Eligible ONLY when:
-- carpet exists
-- upholstery exists
-- state.addingUphAfterCarpet === true (the upsell path that promised "$50 off upholstery")
-Subtract $50 from combined total + Zap totals.
-============================================================================= */
-function bundleDiscount(state = {}) {
-  const hasCarpet = !!(state.carpet && typeof state.carpet.price === "number" && state.carpet.price > 0);
-  const hasUph = !!(state.upholstery && typeof state.upholstery.total === "number" && state.upholstery.total > 0);
-  const eligible = !!state.addingUphAfterCarpet;
-  return (eligible && hasCarpet && hasUph) ? 50 : 0;
-}
 
 /* ========================= Meta Messenger Direct Support ========================= */
 const FB_PAGE_ACCESS_TOKEN =
@@ -356,7 +339,6 @@ function computeCarpetTotals(detail) {
   const billable = chargeableRooms + chargeableHalls + d.stairs + d.extras + d.rugs;
   let price = Math.max(100, billable * 50);
 
-  // Promo: 2 rooms + 1 hallway = $100 (only if exactly that and nothing else)
   if (d.rooms === 2 && d.halls === 1 && d.stairs === 0 && d.extras === 0 && d.rugs === 0) {
     price = 100;
   }
@@ -465,16 +447,14 @@ function parseUph(text = "") {
       : new RegExp(`(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)\\s*${key}s?`, "i");
 
     const m = t.match(rx);
-    if (m) items.push({ type: key, count: numFromText(m[1]) });
-    else if (new RegExp(`\\b${key}s?\\b`, "i").test(t)) items.push({ type: key, count: 1 });
+    if (m) {
+      items.push({ type: key, count: numFromText(m[1]) });
+    } else if (new RegExp(`\\b${key}s?\\b`, "i").test(t)) {
+      items.push({ type: key, count: 1 });
+    }
   }
 
   return items.length ? priceUphFromItems(items) : { total: 0, breakdown: [], items: [] };
-}
-
-/* ========================= Totals helpers (Fix #3 uses these) ========================= */
-function subtotalPrice(state) {
-  return (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
 }
 
 /* ========================= Booking summary builder ========================= */
@@ -484,7 +464,6 @@ function formatPhone(digits) {
     : (digits || "");
 }
 
-// UPDATED: now shows discount when eligible, and Total reflects discount
 function bookingSummary(state) {
   const parts = [];
   if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -495,15 +474,14 @@ function bookingSummary(state) {
     parts.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems > 1 ? "s" : ""}${furn}${dry}) — $${state.duct.total}`);
   }
 
-  const subtotal = subtotalPrice(state);
-  const discount = bundleDiscount(state);
-  const total = Math.max(0, subtotal - discount);
-
-  const discountLine = discount ? `Bundle discount: -$${discount}\n` : "";
+  const total =
+    (state.carpet?.price || 0) +
+    (state.upholstery?.total || 0) +
+    (state.duct?.total || 0);
 
   return `Booking summary
 ${parts.join("\n")}
-${discountLine}Total: $${total}
+Total: $${total}
 
 Name: ${state.name || "-"}
 Phone: ${state.phone ? formatPhone(state.phone) : "-"}
@@ -539,11 +517,8 @@ function selectedServiceForZap(state) {
   return s.join(" + ");
 }
 
-// UPDATED: Total Price sent to zaps now reflects discount
 function totalPriceForZap(state) {
-  const subtotal = subtotalPrice(state);
-  const discount = bundleDiscount(state);
-  return Math.max(0, subtotal - discount);
+  return (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
 }
 
 function encodeForm(data) {
@@ -562,10 +537,7 @@ function snapshotForSession(state) {
     parts.push(`Duct: ${state.duct.pkg} x ${state.duct.systems}${furn}${dry}`);
   }
   const total = totalPriceForZap(state);
-  const discount = bundleDiscount(state);
-  return parts.length
-    ? `Snapshot: ${parts.join(" | ")} | Total so far: $${total}${discount ? ` (includes -$${discount} bundle discount)` : ""}`
-    : "";
+  return parts.length ? `Snapshot: ${parts.join(" | ")} | Total so far: $${total}` : "";
 }
 
 /* ========================= Follow-up flags ========================= */
@@ -623,7 +595,6 @@ function applySmartCorrections(user, state) {
   if (!user || typeof user !== "string") return null;
   const t = user.toLowerCase();
 
-  // phone override
   if (/(phone|number|override|update)/.test(t)) {
     const digits = (user.match(/\d/g) || []).join("");
     if (digits.length === 10) {
@@ -632,7 +603,6 @@ function applySmartCorrections(user, state) {
     }
   }
 
-  // House/Apartment shortcuts only when on that step
   if (state.step === "collect_building" && /\bhouse\b/.test(t)) {
     state.building = "House";
     state.step = "collect_notes";
@@ -645,7 +615,6 @@ function applySmartCorrections(user, state) {
     return { reply: "What floor is the apartment on? (1, 2, 3, or 4+)", quickReplies: ["1", "2", "3", "4"] };
   }
 
-  // floor handler
   if (state.step === "collect_floor") {
     const fl = numFromText(t);
     if (!fl) {
@@ -661,6 +630,39 @@ function applySmartCorrections(user, state) {
     return { reply: "Do you have any notes or special instructions?", quickReplies: ["Yes, I have notes", "No, continue"] };
   }
 
+  if (state.carpet && state.carpet.detail) {
+    const d = { rooms: 0, halls: 0, stairs: 0, extras: 0, rugs: 0, ...state.carpet.detail };
+    let changed = false;
+
+    const toRooms = t.match(/\bchange\s+(?:it\s+)?to\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+rooms?\b/);
+    if (toRooms) { d.rooms = Math.max(0, numFromText(toRooms[1])); changed = true; }
+
+    const addRooms = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*rooms?\b/);
+    if (addRooms) { d.rooms += Math.max(1, numFromText(addRooms[1] || "1")); changed = true; }
+    const remRooms = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*rooms?\b/);
+    if (remRooms) { d.rooms = Math.max(0, d.rooms - Math.max(1, numFromText(remRooms[2] || "1"))); changed = true; }
+
+    const addH = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*hall/);
+    if (addH) { d.halls += Math.max(1, numFromText(addH[1] || "1")); changed = true; }
+    const remH = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*hall/);
+    if (remH) { d.halls = Math.max(0, d.halls - Math.max(1, numFromText(remH[2] || "1"))); changed = true; }
+
+    const addS = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:stairs?|flights?)\b/);
+    if (addS) { d.stairs += Math.max(1, numFromText(addS[1] || "1")); changed = true; }
+    const remS = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:stairs?|flights?)\b/);
+    if (remS) { d.stairs = Math.max(0, d.stairs - Math.max(1, numFromText(remS[2] || "1"))); changed = true; }
+
+    const addR = t.match(/\badd\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:area\s*)?rugs?\b/);
+    if (addR) { d.rugs += Math.max(1, numFromText(addR[1] || "1")); changed = true; }
+    const remR = t.match(/\b(remove|take)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:area\s*)?rugs?\b/);
+    if (remR) { d.rugs = Math.max(0, d.rugs - Math.max(1, numFromText(remR[2] || "1"))); changed = true; }
+
+    if (changed) {
+      state.carpet = computeCarpetTotals(d);
+      return `Updated: ${state.carpet.billable} area(s) (${state.carpet.describedText}) now totals **$${state.carpet.price}**.`;
+    }
+  }
+
   return null;
 }
 
@@ -671,12 +673,14 @@ const displayName = s => s.name2025 || s.name || "";
 const displayEmail = s => s.email2025 || s.email || "";
 const displayPhone = s => normalizeDigits(s.phone2025 || s.phone || "");
 
+// ✅ NEW: zip prompt + zip gate (surgical)
 function promptZip(state) {
   state.step = "collect_zip";
   return { reply: "What’s the ZIP code for the service location?", state };
 }
 
 function promptAddress(state) {
+  // ZIP must be verified before address collection
   if (!state.zipVerified) {
     if (state.zip && zipInArea(state.zip)) {
       state.zipVerified = true;
@@ -936,7 +940,6 @@ async function handleCorePOST(req, res) {
       }
     }
 
-    // FIX #3 applied here
     function preBookingSummary(state) {
       const parts = [];
       if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -949,17 +952,12 @@ async function handleCorePOST(req, res) {
         const dry = state.duct.add?.dryer ? ", +dryer vent" : "";
         parts.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems > 1 ? "s" : ""}${furn}${dry}) — $${state.duct.total}`);
       }
+      const total = (state.carpet?.price || 0) + (state.upholstery?.total || 0) + (state.duct?.total || 0);
 
-      const subtotal = subtotalPrice(state);
-      const discount = bundleDiscount(state);
-      const total = Math.max(0, subtotal - discount);
-
-      const discountLine = discount ? `Bundle discount: -$${discount}\n` : "";
-
-      return `*Quick summary so far*
+      return `**Quick summary so far**
 
 ${parts.join("\n")}
-${discountLine}Combined total: $${total}
+Combined total: $${total}
 
 Proceed with booking?`;
     }
@@ -1033,6 +1031,19 @@ Proceed with booking?`;
       }
 
       case "upholstery_details": {
+        if (/\bsofa\b/i.test(user) && !/\d/.test(user)) {
+          state.step = "upholstery_cushions";
+          state._cushionTarget = "sofa";
+          state._cushionContext = user;
+          return res.status(200).json({ reply: "How many cushions are on the sofa?", quickReplies: ["1", "2", "3", "4"], state });
+        }
+        if (/\bloveseat\b/i.test(user) && !/\d/.test(user)) {
+          state.step = "upholstery_cushions";
+          state._cushionTarget = "loveseat";
+          state._cushionContext = user;
+          return res.status(200).json({ reply: "How many cushions are on the loveseat?", quickReplies: ["1", "2", "3", "4"], state });
+        }
+
         const parsed = parseUph(user);
         if (!parsed.breakdown.length) {
           return res.status(200).json({
@@ -1051,6 +1062,30 @@ Proceed with booking?`;
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your upholstery total is **$${parsed.total}** for ${parsed.breakdown.join(", ")}.\n\nProceed with upholstery?`,
+          quickReplies: ["Proceed", "Change items", "Skip"],
+          state
+        });
+      }
+
+      case "upholstery_cushions": {
+        const seats = numFromText(msg);
+        if (!seats) {
+          return res.status(200).json({ reply: "How many cushions?", quickReplies: ["1", "2", "3", "4"], state });
+        }
+        const target = state._cushionTarget || "sofa";
+        const ctx = (state._cushionContext || "").toLowerCase();
+        const rest = ctx.replace(new RegExp(`\\b${target}\\b`, "i"), "").trim();
+
+        const restParsed = rest ? parseUph(rest) : { items: [] };
+        const combined = priceUphFromItems([{ type: target, count: 1, seats }, ...(restParsed.items || [])]);
+
+        state.upholstery = { total: combined.total, breakdown: combined.breakdown };
+        state._cushionTarget = null;
+        state._cushionContext = null;
+
+        state.step = "upholstery_confirm";
+        return res.status(200).json({
+          reply: `Your upholstery total is **$${combined.total}** for ${combined.breakdown.join(", ")}.\n\nProceed with upholstery?`,
           quickReplies: ["Proceed", "Change items", "Skip"],
           state
         });
@@ -1138,14 +1173,17 @@ Proceed with booking?`;
         return res.status(200).json({ reply: furnaceAddOnCopy(state.duct.pkg), quickReplies: ["Add furnace", "No furnace"], state });
       }
 
+      // ✅ FIX #4 (SURGICAL): “No add-ons” contains the substring “add” → anchor match to start-of-string only
       case "duct_add_furnace": {
-        state.duct.add.furnace = /add/i.test(msg);
+        state.duct.add.furnace = /^\s*add\b/i.test(msg);
         state.step = "duct_add_dryer";
         return res.status(200).json({ reply: dryerVentCopy, quickReplies: ["Add dryer vent", "No add-ons"], state });
       }
 
+      // ✅ FIX #4 (SURGICAL): “No add-ons” must NOT trigger dryer add
       case "duct_add_dryer": {
-        state.duct.add.dryer = /add/i.test(msg);
+        state.duct.add.dryer = /^\s*add\b/i.test(msg);
+
         const base = state.duct.pkg === "Deep" ? 500 : 200;
         let total = state.duct.systems * base;
         if (state.duct.add.furnace) total += state.duct.systems * (state.duct.pkg === "Deep" ? 100 : 200);
@@ -1168,9 +1206,12 @@ Proceed with booking?`;
         return res.status(200).json(promptAddress(state));
       }
 
+      /* ✅ NEW ZIP STEP */
       case "collect_zip": {
         const zip = normalizeZip(user);
-        if (!zip) return res.status(200).json({ reply: "Please enter a valid **5-digit ZIP code**.", state });
+        if (!zip) {
+          return res.status(200).json({ reply: "Please enter a valid **5-digit ZIP code**.", state });
+        }
 
         state.zip = zip;
 
@@ -1202,7 +1243,45 @@ Proceed with booking?`;
         return res.status(200).json(promptAddress(state));
       }
 
+      case "confirm_reuse_address": {
+        if (/^y/i.test(msg)) return res.status(200).json(promptName(state));
+        state.address = ""; state.Address = ""; state.step = "collect_address";
+        return res.status(200).json({ reply: "What’s the full service address? (street + city + state — ZIP optional)", state });
+      }
+      case "confirm_reuse_name": {
+        if (/^y/i.test(msg)) return res.status(200).json(promptPhone(state));
+        state.name = ""; state.name2025 = ""; state.step = "collect_name";
+        return res.status(200).json({ reply: "What’s your full name? (First and last name)", state });
+      }
+      case "confirm_reuse_phone": {
+        if (/^y/i.test(msg)) return res.status(200).json(promptEmail(state));
+        state.phone = ""; state.phone2025 = ""; state.step = "collect_phone";
+        return res.status(200).json({ reply: "What’s the best phone number to reach you?", state });
+      }
+      case "confirm_reuse_email": {
+        if (/^y/i.test(msg)) {
+          state.step = "collect_date";
+          refreshFollowUpIfEligible(state);
+          return res.status(200).json({ reply: "What day would you like the cleaning? (e.g., July 10 or 07/10)", state });
+        }
+        state.email = ""; state.email2025 = ""; state.step = "collect_email";
+        return res.status(200).json({ reply: "What’s your email address?", state });
+      }
+
       case "collect_address": {
+        if (isQuestion(user)) {
+          const a = answerFAQ(user);
+          if (a) {
+            logFAQ(state, user, a);
+            return res.status(200).json({
+              reply: a + "\n\nWhat’s the full service address? (street + city + state — ZIP optional)",
+              state,
+              intentHandled: "faq"
+            });
+          }
+          return res.status(200).json({ reply: "I can help with that, but first I need your address. What’s the full service address?", state });
+        }
+
         const hasStreet = /^\s*\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*\b/.test(user);
         const hasState = /\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b/i.test(user);
 
@@ -1235,6 +1314,36 @@ Proceed with booking?`;
         return res.status(200).json(promptName(state));
       }
 
+      case "ooa_collect_phone": {
+        const digits = (user.match(/\d/g) || []).join("");
+        if (digits.length !== 10) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number we can call.", state });
+        state.phone = digits; state.step = "ooa_collect_name";
+        return res.status(200).json({ reply: "Thanks. **Who should we ask for?** (First and last name)", state });
+      }
+
+      case "ooa_collect_name": {
+        if (!/\b[a-z][a-z]+(?:[-' ]?[a-z]+)?\s+[a-z][a-z]+\b/i.test(user)) {
+          return res.status(200).json({ reply: "Please provide both a **first and last name**.", state });
+        }
+        state.name = user.trim();
+        const handoffMsg = `Thanks, ${state.name}! We’ll review your address (${state.address || "your location"}) and call ${formatPhone(state.phone)} to see if we can service your area.`;
+
+        await sendSessionZapFormEncoded({
+          Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
+          "selected service": selectedServiceForZap(state),
+          "Total Price": totalPriceForZap(state),
+          name2025: state.name || "",
+          phone2025: state.phone || "",
+          email2025: state.email || "",
+          Address: state.address || "",
+          booking_complete: false,
+          conversation: snapshotForSession(state) || "OOA handoff"
+        });
+
+        state = { step: "choose_service", faqLog: [] };
+        return res.status(200).json({ reply: handoffMsg, quickReplies: SERVICE_CHOICES, state });
+      }
+
       case "collect_name": {
         if (!/\b[a-z][a-z]+(?:[-' ]?[a-z]+)?\s+[a-z][a-z]+\b/i.test(user)) {
           return res.status(200).json({ reply: "Please provide your **first and last name**.", state });
@@ -1248,7 +1357,8 @@ Proceed with booking?`;
         if (digits.length !== 10) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
         state.phone = digits;
 
-        try { await sendSessionIfEligible(state, "got phone"); } catch (e) { console.error("Session emit failed", e); }
+        try { await sendSessionIfEligible(state, "got phone"); }
+        catch (e) { console.error("Session (got phone) emit failed", e); }
 
         refreshFollowUpIfEligible(state);
         return res.status(200).json(promptEmail(state));
@@ -1494,7 +1604,6 @@ module.exports = async (req, res) => {
 /* ========================= ZAP HANDLERS (form-encoded) ========================= */
 const fetch = global.fetch || require("node-fetch");
 
-// Your two Zap Webhooks:
 const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/"; // Booking Zap
 const ZAPIER_SESSION_URL = "https://hooks.zapier.com/hooks/catch/3165661/u12ap8l/"; // Session/Partial Zap
 
@@ -1512,7 +1621,6 @@ async function sendBookingZapFormEncoded(payload) {
 
 async function sendSessionZapFormEncoded(payload) {
   try {
-    // Only send if some contact info (guard stays)
     if (!payload.name2025 && !payload.phone2025 && !payload.email2025) return;
 
     await fetch(ZAPIER_SESSION_URL, {
