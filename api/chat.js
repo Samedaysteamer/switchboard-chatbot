@@ -1129,3 +1129,37 @@ module.exports = async (req, res) => {
   // ManyChat + Web branch
   return handleCorePOST(req, res);
 };
+
+
+
+/* ========================= ZAP HANDLERS (form-encoded) ========================= */
+const fetch = global.fetch || require("node-fetch");
+
+const ZAPIER_BOOKING_URL = "https://hooks.zapier.com/hooks/catch/3165661/u13zg9e/"; // Booking Zap
+const ZAPIER_SESSION_URL = "https://hooks.zapier.com/hooks/catch/3165661/u12ap8l/"; // Session/Partial Zap
+
+async function sendBookingZapFormEncoded(payload) {
+  try {
+    await fetch(ZAPIER_BOOKING_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: encodeForm(payload)
+    });
+  } catch (err) {
+    console.error("Booking Zap failed", err);
+  }
+}
+
+async function sendSessionZapFormEncoded(payload) {
+  try {
+    if (!payload.name2025 && !payload.phone2025 && !payload.email2025) return;
+
+    await fetch(ZAPIER_SESSION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: encodeForm(payload)
+    });
+  } catch (err) {
+    console.error("Session Zap failed", err);
+  }
+}
