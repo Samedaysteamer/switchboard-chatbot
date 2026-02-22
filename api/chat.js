@@ -3,7 +3,7 @@
 // SURGICAL: (1) duct "No add-ons" never adds dryer, (2) sofa/loveseat cushion gate (4+ => sectional),
 //          (3) remove Skip from PRICE CONFIRMS
 // FIXED NOW: (4) web state_json hydration (prevents resets), (5) booking continuation after collect_name (phone/email/date/window/pets/water/building/notes)
-// ✅ FIX NOW (ONLY): show COMBINED total (carpet + upholstery - $50) on upholstery confirm when bundle applies (addingUphAfterCarpet)
+// FIX NOW (ONE CHANGE): (6) After upholstery quote + Proceed -> offer carpet upsell BEFORE ZIP
 
 const crypto = require("crypto");
 
@@ -480,6 +480,10 @@ function repromptForStep(state = {}) {
     case "uph_upsell_offer":
       return { reply: "Want to add upholstery cleaning?", quickReplies: ["Yes, add upholstery", "No, skip"], state };
 
+    // ✅ NEW (single change): upholstery -> carpet upsell step
+    case "carpet_upsell_offer":
+      return { reply: "Want me to price carpet cleaning too?", quickReplies: ["Yes, add carpet", "No, skip"], state };
+
     case "upholstery_confirm":
       return { reply: "Proceed with upholstery?", quickReplies: ["Proceed", "Change items"], state };
     case "duct_confirm":
@@ -663,19 +667,6 @@ async function handleCorePOST(req, res) {
         }
 
         state.upholstery = { total: parsed.total, breakdown: parsed.breakdown };
-
-        // ✅ FIX (ONLY): if bundle applies, show combined total (carpet + upholstery - $50)
-        const disc = bundleDiscount(state);
-        if (disc > 0 && state.carpet?.price) {
-          const combined = totalWithDiscount(state);
-          return res.status(200).json({
-            reply:
-              `Your combined total is **$${combined}** (carpet **$${state.carpet.price}** + upholstery **$${state.upholstery.total}** − **$${disc}**).\n\nProceed with booking?`,
-            quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
-            state
-          });
-        }
-
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your upholstery total is **$${parsed.total}** for ${parsed.breakdown.join(", ")}.\n\nProceed with upholstery?`,
@@ -713,19 +704,6 @@ async function handleCorePOST(req, res) {
         state.upholstery = { total: priced.total, breakdown: priced.breakdown };
         state._cushionTarget = null;
 
-        // ✅ FIX (ONLY): if bundle applies, show combined total (carpet + upholstery - $50)
-        const disc = bundleDiscount(state);
-        if (disc > 0 && state.carpet?.price) {
-          const combined = totalWithDiscount(state);
-          state.step = "upholstery_confirm";
-          return res.status(200).json({
-            reply:
-              `Your combined total is **$${combined}** (carpet **$${state.carpet.price}** + upholstery **$${state.upholstery.total}** − **$${disc}**).\n\nProceed with booking?`,
-            quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
-            state
-          });
-        }
-
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your upholstery total is **$${priced.total}** for ${priced.breakdown.join(", ")}.\n\nProceed with upholstery?`,
@@ -740,20 +718,6 @@ async function handleCorePOST(req, res) {
 
         const merged = priceUphFromItems([{ type: "sectional", seats }]);
         state.upholstery = { total: merged.total, breakdown: merged.breakdown };
-
-        // ✅ FIX (ONLY): if bundle applies, show combined total (carpet + upholstery - $50)
-        const disc = bundleDiscount(state);
-        if (disc > 0 && state.carpet?.price) {
-          const combined = totalWithDiscount(state);
-          state.step = "upholstery_confirm";
-          return res.status(200).json({
-            reply:
-              `Your combined total is **$${combined}** (carpet **$${state.carpet.price}** + upholstery **$${state.upholstery.total}** − **$${disc}**).\n\nProceed with booking?`,
-            quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
-            state
-          });
-        }
-
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your sectional price is **$${merged.total}**.\n\nProceed with upholstery?`,
@@ -767,7 +731,32 @@ async function handleCorePOST(req, res) {
           state.step = "upholstery_details";
           return res.status(200).json({ reply: "No problem — tell me the upholstery pieces again.", quickReplies: UPH_CHOICES, state });
         }
+
+        // ✅ ONE NEW BEHAVIOR: If upholstery is the only service so far, offer carpet upsell BEFORE ZIP
+        if (!state.carpet?.price && !state.duct?.total) {
+          state.step = "carpet_upsell_offer";
+          return res.status(200).json({
+            reply: "Since you’re booking upholstery, you qualify for a **free hallway** at 4+ areas, and at **6+ areas** you also get **one room free**. Want me to price carpet cleaning too?",
+            quickReplies: ["Yes, add carpet", "No, skip"],
+            state
+          });
+        }
+
+        // otherwise go to booking
         return res.status(200).json(promptAddress(state));
+      }
+
+      // ✅ NEW STEP HANDLER (only used when upholstery is first/only service)
+      case "carpet_upsell_offer": {
+        if (/no|skip/i.test(msg)) {
+          return res.status(200).json(promptAddress(state));
+        }
+        state.addingCarpetAfterUph = true;
+        state.step = "carpet_details";
+        return res.status(200).json({
+          reply: "Awesome — how many carpet areas should I price? (e.g., “3 rooms, hallway, 1 rug”).",
+          state
+        });
       }
       /* ======================================================== */
 
