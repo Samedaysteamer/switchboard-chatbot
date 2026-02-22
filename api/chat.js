@@ -49,6 +49,13 @@ function formatPhone(digits) {
     : (digits || "");
 }
 
+// ✅ REQUIRED for Zapier form-encoded posts (this was missing)
+function encodeForm(data) {
+  return Object.keys(data || {})
+    .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? ""))
+    .join("&");
+}
+
 // ZIP helpers
 function normalizeZip(input = "") {
   const m = String(input || "").match(/\b(\d{5})(?:-\d{4})?\b/);
@@ -1196,4 +1203,4 @@ async function sendSessionZapFormEncoded(payload) {
   } catch (err) {
     console.error("Session Zap failed", err);
   }
-                      }
+      }
