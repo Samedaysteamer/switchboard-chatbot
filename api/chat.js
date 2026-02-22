@@ -3,7 +3,7 @@
 // SURGICAL: (1) duct "No add-ons" never adds dryer, (2) sofa/loveseat cushion gate (4+ => sectional),
 //          (3) remove Skip from PRICE CONFIRMS
 // FIXED NOW: (4) web state_json hydration (prevents resets), (5) booking continuation after collect_name (phone/email/date/window/pets/water/building/notes)
-// FIX NOW (ONE CHANGE): (6) After upholstery quote + Proceed -> offer carpet upsell BEFORE ZIP
+// ✅ FIXED NOW (6): Bundle summary + $50 discount works BOTH directions (Carpet→Uph, Uph→Carpet) with combined total screen
 
 const crypto = require("crypto");
 
@@ -89,12 +89,19 @@ function normalizeWindow(input = "") {
 
 const UPH_PRICES = { loveseat: 100, recliner: 80, ottoman: 50, "dining chair": 25, sofa: 150, mattress: 150 };
 
-/* ========================= Bundle Discount (LOCKED) ========================= */
+/* ========================= Bundle Discount (LOCKED + UPDATED) =========================
+Rule:
+- Applies when BOTH carpet + upholstery exist
+- AND the bundle was created via either upsell path:
+    addingUphAfterCarpet OR addingCarpetAfterUph
+- AND carpet has at least 2 billable areas (per your “2+ rooms/areas” requirement)
+============================================================================= */
 function bundleDiscount(state = {}) {
   const hasCarpet = !!(state.carpet && typeof state.carpet.price === "number" && state.carpet.price > 0);
   const hasUph = !!(state.upholstery && typeof state.upholstery.total === "number" && state.upholstery.total > 0);
-  const eligible = !!state.addingUphAfterCarpet;
-  return (eligible && hasCarpet && hasUph) ? 50 : 0;
+  const eligiblePath = !!(state.addingUphAfterCarpet || state.addingCarpetAfterUph);
+  const carpetOk = !!(state.carpet && typeof state.carpet.billable === "number" && state.carpet.billable >= 2);
+  return (eligiblePath && hasCarpet && hasUph && carpetOk) ? 50 : 0;
 }
 
 /* ========================= Meta Messenger Direct Support ========================= */
@@ -370,6 +377,24 @@ function subtotalPrice(state) {
 function totalWithDiscount(state) {
   return Math.max(0, subtotalPrice(state) - bundleDiscount(state));
 }
+
+function combinedBundleSummary(state) {
+  const lines = [];
+  if (state.carpet) lines.push(`Carpet Cleaning: $${state.carpet.price}`);
+  if (state.upholstery) lines.push(`Upholstery Cleaning: $${state.upholstery.total}`);
+  if (state.duct) lines.push(`Air Duct Cleaning: $${state.duct.total}`);
+
+  const discount = bundleDiscount(state);
+  const total = totalWithDiscount(state);
+
+  return `Quick summary so far
+
+${lines.join("\n")}
+${discount ? `Bundle discount: -$${discount}\n` : ""}Combined total: $${total}
+
+Proceed with booking?`;
+}
+
 function bookingSummary(state) {
   const parts = [];
   if (state.carpet) parts.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
@@ -480,14 +505,24 @@ function repromptForStep(state = {}) {
     case "uph_upsell_offer":
       return { reply: "Want to add upholstery cleaning?", quickReplies: ["Yes, add upholstery", "No, skip"], state };
 
-    // ✅ NEW (single change): upholstery -> carpet upsell step
-    case "carpet_upsell_offer":
-      return { reply: "Want me to price carpet cleaning too?", quickReplies: ["Yes, add carpet", "No, skip"], state };
-
     case "upholstery_confirm":
       return { reply: "Proceed with upholstery?", quickReplies: ["Proceed", "Change items"], state };
     case "duct_confirm":
       return { reply: "Proceed?", quickReplies: ["Proceed", "Change"], state };
+
+    case "carpet_upsell_offer":
+      return { reply: "Want me to price carpet too?", quickReplies: ["Yes, add carpet", "No, skip"], state };
+
+    case "confirm_combined_proceed":
+      return { reply: combinedBundleSummary(state), quickReplies: ["Proceed", "Change items"], state };
+    case "confirm_combined_edit_picker": {
+      const opts = [];
+      if (state.carpet) opts.push("Change carpet");
+      if (state.upholstery) opts.push("Change upholstery");
+      if (state.duct) opts.push("Change duct");
+      opts.push("Cancel");
+      return { reply: "What would you like to change?", quickReplies: opts, state };
+    }
 
     case "collect_zip":
       return { reply: "What’s the ZIP code for the service location?", state };
@@ -612,9 +647,14 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "No problem — tell me the carpet areas again.", state });
         }
 
-        // If another service already exists, go to booking (no extra confirm screens)
+        // ✅ If we already have upholstery or duct, show combined summary BEFORE ZIP
         if (state.upholstery?.total || state.duct?.total) {
-          return res.status(200).json(promptAddress(state));
+          state.step = "confirm_combined_proceed";
+          return res.status(200).json({
+            reply: combinedBundleSummary(state),
+            quickReplies: ["Proceed", "Change items"],
+            state
+          });
         }
 
         // Otherwise offer upholstery discount upsell (LOCKED behavior)
@@ -630,7 +670,7 @@ async function handleCorePOST(req, res) {
         if (/^no\b|skip/i.test(msg)) {
           return res.status(200).json(promptAddress(state));
         }
-        state.addingUphAfterCarpet = true;
+        state.addingUphAfterCarpet = true; // ✅ needed for bundle discount eligibility
         state.step = "upholstery_details";
         return res.status(200).json({ reply: "Great — what upholstery pieces would you like cleaned?", quickReplies: UPH_CHOICES, state });
       }
@@ -732,31 +772,61 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "No problem — tell me the upholstery pieces again.", quickReplies: UPH_CHOICES, state });
         }
 
-        // ✅ ONE NEW BEHAVIOR: If upholstery is the only service so far, offer carpet upsell BEFORE ZIP
-        if (!state.carpet?.price && !state.duct?.total) {
-          state.step = "carpet_upsell_offer";
+        // ✅ If carpet already exists (Carpet→Uph bundle), show combined summary BEFORE ZIP
+        if (state.carpet?.price || state.duct?.total) {
+          state.step = "confirm_combined_proceed";
           return res.status(200).json({
-            reply: "Since you’re booking upholstery, you qualify for a **free hallway** at 4+ areas, and at **6+ areas** you also get **one room free**. Want me to price carpet cleaning too?",
-            quickReplies: ["Yes, add carpet", "No, skip"],
+            reply: combinedBundleSummary(state),
+            quickReplies: ["Proceed", "Change items"],
             state
           });
         }
 
-        // otherwise go to booking
-        return res.status(200).json(promptAddress(state));
-      }
-
-      // ✅ NEW STEP HANDLER (only used when upholstery is first/only service)
-      case "carpet_upsell_offer": {
-        if (/no|skip/i.test(msg)) {
-          return res.status(200).json(promptAddress(state));
-        }
-        state.addingCarpetAfterUph = true;
-        state.step = "carpet_details";
+        // ✅ Upholstery-only: upsell carpet BEFORE ZIP
+        state.step = "carpet_upsell_offer";
         return res.status(200).json({
-          reply: "Awesome — how many carpet areas should I price? (e.g., “3 rooms, hallway, 1 rug”).",
+          reply: "Since you’re booking upholstery, you qualify for a free hallway at 4+ areas, and at 6+ areas you also get one room free. Want me to price carpet too?",
+          quickReplies: ["Yes, add carpet", "No, skip"],
           state
         });
+      }
+
+      case "carpet_upsell_offer": {
+        if (/^no\b|skip/i.test(msg)) {
+          return res.status(200).json(promptAddress(state));
+        }
+        state.addingCarpetAfterUph = true; // ✅ needed for bundle discount eligibility
+        state.step = "carpet_details";
+        return res.status(200).json({ reply: "Awesome — how many carpet areas should I price? (e.g., “3 rooms, hallway, 1 rug”).", state });
+      }
+      /* ======================================================== */
+
+      /* ========================= Combined bundle proceed (NEW) ========================= */
+      case "confirm_combined_proceed": {
+        if (/^proceed\b|^yes\b/i.test(msg)) {
+          return res.status(200).json(promptAddress(state));
+        }
+        if (/change/i.test(msg)) {
+          const opts = [];
+          if (state.carpet) opts.push("Change carpet");
+          if (state.upholstery) opts.push("Change upholstery");
+          if (state.duct) opts.push("Change duct");
+          opts.push("Cancel");
+          state.step = "confirm_combined_edit_picker";
+          return res.status(200).json({ reply: "What would you like to change?", quickReplies: opts, state });
+        }
+        return res.status(200).json({ reply: combinedBundleSummary(state), quickReplies: ["Proceed", "Change items"], state });
+      }
+
+      case "confirm_combined_edit_picker": {
+        if (/cancel/i.test(msg)) {
+          state.step = "confirm_combined_proceed";
+          return res.status(200).json({ reply: combinedBundleSummary(state), quickReplies: ["Proceed", "Change items"], state });
+        }
+        if (/change carpet/i.test(msg)) { state.step = "carpet_details"; return res.status(200).json({ reply: "Tell me the carpet areas again.", state }); }
+        if (/change upholstery/i.test(msg)) { state.step = "upholstery_details"; return res.status(200).json({ reply: "Tell me the upholstery pieces again.", quickReplies: UPH_CHOICES, state }); }
+        if (/change duct/i.test(msg)) { state.step = "duct_package"; return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic", "Deep"], state }); }
+        return res.status(200).json({ reply: "Tap an option to change, or Cancel.", state });
       }
       /* ======================================================== */
 
@@ -857,7 +927,7 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "Please provide your **first and last name**.", state });
         }
         state.name = user.trim();
-        // ✅ continue booking (no stall)
+        // ✅ continue booking
         return res.status(200).json(promptPhone(state));
       }
 
