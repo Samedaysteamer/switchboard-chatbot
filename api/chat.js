@@ -4,6 +4,7 @@
 //          (3) remove Skip from PRICE CONFIRMS
 // FIXED NOW: (4) web state_json hydration (prevents resets), (5) booking continuation after collect_name (phone/email/date/window/pets/water/building/notes)
 // ✅ FIXED NOW (6): Bundle summary + $50 discount works BOTH directions (Carpet→Uph, Uph→Carpet) with combined total screen
+// ✅ FIXED NOW (7): Zapier restored (Session/Partial on phone capture + Booking on notes completion)
 
 const crypto = require("crypto");
 
@@ -46,6 +47,13 @@ function formatPhone(digits) {
   return (d && d.length === 10)
     ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`
     : (digits || "");
+}
+
+// ✅ FIX (Zapier): form encoder used by Zapier senders
+function encodeForm(data) {
+  return Object.keys(data || {})
+    .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? ""))
+    .join("&");
 }
 
 // ZIP helpers
@@ -376,6 +384,30 @@ function subtotalPrice(state) {
 }
 function totalWithDiscount(state) {
   return Math.max(0, subtotalPrice(state) - bundleDiscount(state));
+}
+
+// ✅ FIX (Zapier): helpers for Zap payloads (used by Booking + Session)
+function selectedServiceForZap(state) {
+  const s = [];
+  if (state.carpet) s.push("Carpet");
+  if (state.upholstery) s.push("Upholstery");
+  if (state.duct) s.push("Air Duct");
+  return s.join(" + ");
+}
+function buildCleaningBreakdownForZap(state) {
+  const lines = [];
+  if (state.carpet) {
+    lines.push(`Carpet — ${state.carpet.billable} area(s) (${state.carpet.describedText}) — $${state.carpet.price}`);
+  }
+  if (state.upholstery) {
+    lines.push(`Upholstery — ${state.upholstery.breakdown?.join(", ") || ""} — $${state.upholstery.total}`);
+  }
+  if (state.duct) {
+    const furn = state.duct.add?.furnace ? ", +furnace" : "";
+    const dry = state.duct.add?.dryer ? ", +dryer vent" : "";
+    lines.push(`Duct — ${state.duct.pkg} (${state.duct.systems} system${state.duct.systems > 1 ? "s" : ""}${furn}${dry}) — $${state.duct.total}`);
+  }
+  return lines.join("\n");
 }
 
 function combinedBundleSummary(state) {
@@ -935,6 +967,33 @@ async function handleCorePOST(req, res) {
         const digits = (user.match(/\d/g) || []).join("");
         if (digits.length !== 10) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
         state.phone = digits;
+
+        // ✅ FIX (Zapier): Session/Partial Zap once we have name + phone
+        if (!state._sessionSent) {
+          try {
+            const sessionPayload = {
+              Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
+              "selected service": selectedServiceForZap(state),
+              "Total Price": totalWithDiscount(state),
+              name2025: state.name || "",
+              phone2025: state.phone || "",
+              email2025: state.email || "",
+              Address: state.address || "",
+              date: state.date || "",
+              Window: state.window || "",
+              pets: state.pets || "",
+              OutdoorWater: state.outdoorWater || "",
+              BuildingType: state.building || "",
+              Notes: state.notes || "",
+              booking_complete: false
+            };
+            await sendSessionZapFormEncoded(sessionPayload);
+            state._sessionSent = true;
+          } catch (e) {
+            console.error("Session Zap send failed", e);
+          }
+        }
+
         return res.status(200).json(promptEmail(state));
       }
 
@@ -1017,6 +1076,32 @@ async function handleCorePOST(req, res) {
         }
         if (/^\s*no/i.test(user)) state.notes = "-";
         else state.notes = (user || "").trim() || "-";
+
+        // ✅ FIX (Zapier): Booking Zap once booking is complete (notes captured)
+        if (!state._bookingSent) {
+          try {
+            const bookingPayload = {
+              Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
+              "selected service": selectedServiceForZap(state),
+              "Total Price": totalWithDiscount(state),
+              name2025: state.name || "",
+              phone2025: state.phone || "",
+              email2025: state.email || "",
+              Address: state.address || "",
+              date: state.date || "",
+              Window: state.window || "",
+              pets: state.pets || "",
+              OutdoorWater: state.outdoorWater || "",
+              BuildingType: state.building || "",
+              Notes: state.notes || "",
+              booking_complete: true
+            };
+            await sendBookingZapFormEncoded(bookingPayload);
+            state._bookingSent = true;
+          } catch (e) {
+            console.error("Booking Zap send failed", e);
+          }
+        }
 
         const summary = bookingSummary(state);
         state.step = "post_summary_offer";
@@ -1130,8 +1215,6 @@ module.exports = async (req, res) => {
   return handleCorePOST(req, res);
 };
 
-
-
 /* ========================= ZAP HANDLERS (form-encoded) ========================= */
 const fetch = global.fetch || require("node-fetch");
 
@@ -1162,4 +1245,4 @@ async function sendSessionZapFormEncoded(payload) {
   } catch (err) {
     console.error("Session Zap failed", err);
   }
-}
+                                }
