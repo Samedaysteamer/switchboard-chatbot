@@ -1,11 +1,11 @@
 // Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
 // LOCKED: ZIP gate + bundle discount + duct pricing
-// SURGICAL: (1) duct "No add-ons" never adds dryer, (2) sofa/loveseat cushion gate (4+ => sectional),
-//          (3) remove Skip from PRICE CONFIRMS
-// FIXED NOW: (4) web state_json hydration (prevents resets), (5) booking continuation after collect_name (phone/email/date/window/pets/water/building/notes)
-// ✅ FIXED NOW (6): Bundle summary + $50 discount works BOTH directions (Carpet→Uph, Uph→Carpet) with combined total screen
-// ✅ FIXED NOW (7): Zapier restored (Session/Partial on phone capture + Booking on notes completion)
-// ✅ FIXED NOW (OOA): Out-of-area ZIP asks ONLY phone + name, sends Session Zap, then stops
+// SURGICAL ADD (NEW): (A) Auto-start intent router (handles users who skip "hello")
+//                     (B) Global interrupts (answer questions mid-flow without resetting)
+//                     (C) Edit mode (change phone/email/address/date/window mid-flow; resume where they left off)
+// Existing FIXES KEPT: duct "No add-ons" never adds dryer, sofa/loveseat cushion gate (4+ => sectional),
+//                      remove Skip from PRICE CONFIRMS, state_json hydration, booking continuation,
+//                      bundle discount both directions, Zapier restored, OOA flow
 
 const crypto = require("crypto");
 
@@ -48,6 +48,19 @@ function formatPhone(digits) {
   return (d && d.length === 10)
     ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`
     : (digits || "");
+}
+
+function extractTenDigit(text = "") {
+  const d = normalizeDigits(text);
+  if (d.length === 10) return d;
+  // allow leading 1
+  if (d.length === 11 && d.startsWith("1")) return d.slice(1);
+  return "";
+}
+
+function extractEmail(text = "") {
+  const m = String(text || "").match(/[\w.\-+]+@[\w.\-]+\.\w{2,}/i);
+  return m ? m[0].trim() : "";
 }
 
 // ✅ FIX (Zapier): form encoder used by Zapier senders
@@ -298,9 +311,14 @@ function parseAreas(text = "") {
   else if (/\bhall(?:way|ways)?\b/.test(t)) halls = 1;
 
   let stairs = 0;
-  const ms = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:flights?|stairs?)/);
-  if (ms) stairs = numFromText(ms[1]);
-  else if (/\b(?:flights?|stairs?)\b/.test(t)) stairs = 1;
+
+  // 🔒 Stairs: 1 area per flight/set. If "stairs" without number => exactly 1.
+  // Added: supports "sets" phrasing ("2 sets of stairs")
+  const ms1 = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:flights?|stairs?)/);
+  const ms2 = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*sets?\s*(?:of\s*)?(?:stairs?|steps?)/);
+  if (ms2) stairs = numFromText(ms2[1]);
+  else if (ms1) stairs = numFromText(ms1[1]);
+  else if (/\b(?:flights?|stairs?|staircase|steps)\b/.test(t)) stairs = 1;
 
   let rugs = 0;
   const mr = t.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:area\s*)?rugs?\b/);
@@ -481,13 +499,15 @@ function promptEmail(state) {
 }
 
 /* ========================= Intro ========================= */
-function intro() {
+function intro(state = {}) {
   const hour = new Date().getHours();
   const hello = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   return {
-    reply: `${hello}! Are you looking for carpet cleaning, upholstery cleaning, or air duct cleaning service?`,
+    reply:
+      `${hello}! Tell me what you need cleaned — carpet, upholstery, or air ducts.\n` +
+      `If you already know the areas, you can type it like “3 rooms, hallway, stairs”.`,
     quickReplies: SERVICE_CHOICES,
-    state: { step: "choose_service", faqLog: [] }
+    state: { ...state, step: "choose_service", faqLog: state.faqLog || [] }
   };
 }
 
@@ -589,8 +609,145 @@ function repromptForStep(state = {}) {
       return { reply: "Who should we ask for? (First and last name)", state };
 
     default:
-      return intro();
+      return intro(state);
   }
+}
+
+/* ========================= NEW: Intent + Interrupt Layer ========================= */
+function detectServiceFromText(msgLower = "") {
+  const m = String(msgLower || "");
+  // priority: duct > upholstery > carpet (duct keywords are specific)
+  if (/(duct|air\s*duct|dryer\s*vent|vent\s*clean|furnace)/.test(m)) return "duct";
+  if (/(upholstery|sectional|sofa|couch|loveseat|recliner|ottoman|chair|mattress)/.test(m)) return "upholstery";
+  if (/(carpet|rooms?|bedrooms?|hall|hallway|stairs?|flight|staircase|steps|rugs?)/.test(m)) return "carpet";
+  return null;
+}
+
+function autoStartFromMessage(userText, state) {
+  const msg = String(userText || "").toLowerCase();
+
+  // If they already typed carpet areas, jump straight to price confirm
+  const carpetParsed = parseAreas(userText);
+  if (carpetParsed?.billable) {
+    state.carpet = carpetParsed;
+    state.step = "carpet_confirm";
+    return {
+      reply: `Got it — ${carpetParsed.describedText}. Your total is **$${carpetParsed.price}**.\n\nMove forward with carpet?`,
+      quickReplies: ["Yes, move forward", "Change areas"],
+      state
+    };
+  }
+
+  // If they already typed upholstery items, jump straight to upholstery confirm
+  const uphParsed = parseUph(userText);
+  if (uphParsed?.breakdown?.length) {
+    state.upholstery = { total: uphParsed.total, breakdown: uphParsed.breakdown };
+    state.step = "upholstery_confirm";
+    return {
+      reply: `Got it — ${uphParsed.breakdown.join(", ")}. Your upholstery total is **$${uphParsed.total}**.\n\nProceed with upholstery?`,
+      quickReplies: ["Proceed", "Change items"],
+      state
+    };
+  }
+
+  // Otherwise fall back to service chooser, but keep it friendly
+  state.step = "choose_service";
+  return intro(state);
+}
+
+function startEditMode(state, resumeStep, targetStep, question, quickReplies) {
+  state._editing = true;
+  state._resumeStep = resumeStep || "choose_service";
+  state.step = targetStep;
+  return { reply: question, quickReplies, state };
+}
+
+function exitEditModeAndResume(state) {
+  const resume = state._resumeStep || "choose_service";
+  state._editing = false;
+  state._resumeStep = null;
+  state.step = resume;
+  return repromptForStep(state);
+}
+
+function handleGlobalInterrupts(user, msgLower, state) {
+  const txt = String(user || "").trim();
+  const m = String(msgLower || "");
+
+  // 1) Stanley Steemer question — answer and continue same step
+  if (/(stanley\s*steemer|is\s*this\s*stanley|are\s*you\s*stanley)/i.test(txt)) {
+    const cont = repromptForStep(state);
+    return {
+      reply:
+        "No — this is Same Day Steamerz. We’re a locally owned company.\n\n" +
+        (cont?.reply || "How can we help?"),
+      quickReplies: cont.quickReplies,
+      state
+    };
+  }
+
+  // 2) Service-area / “do you service ___” question — answer, then keep moving
+  if (/(do\s*you\s*service|service\s*area|are\s*you\s*in|do\s*you\s*cover|do\s*you\s*come\s*to)/i.test(txt) && isQuestion(txt)) {
+    // Don’t force ZIP gate early; just answer and proceed.
+    const cont = repromptForStep(state.step ? state : { ...state, step: "choose_service" });
+    return {
+      reply:
+        "Yes — we service most of Metro Atlanta and surrounding areas.\n\n" +
+        (cont?.reply || "What service are you looking for?"),
+      quickReplies: cont.quickReplies || SERVICE_CHOICES,
+      state: cont.state || state
+    };
+  }
+
+  // 3) Change / update phone (mid-flow)
+  if (/(wrong\s*number|change\s*phone|update\s*phone|new\s*phone|wrong\s*phone)/i.test(txt)) {
+    const resume = state.step || "choose_service";
+    return startEditMode(
+      state,
+      resume,
+      "collect_phone",
+      "No problem — what’s the best phone number to reach you?",
+      undefined
+    );
+  }
+
+  // 4) Change / update email (mid-flow)
+  if (/(wrong\s*email|change\s*email|update\s*email|new\s*email)/i.test(txt)) {
+    const resume = state.step || "choose_service";
+    return startEditMode(
+      state,
+      resume,
+      "collect_email",
+      "No problem — what’s the best email address?",
+      undefined
+    );
+  }
+
+  // 5) If they directly type a phone number with “phone/number/call me” while mid-flow, update without reset
+  const ten = extractTenDigit(txt);
+  if (ten && /(phone|number|call\s*me|text\s*me)/i.test(txt) && state.step && state.step !== "collect_phone") {
+    state.phone = ten;
+    const cont = repromptForStep(state);
+    return {
+      reply: `Got it — I updated your phone number.\n\n${cont.reply}`,
+      quickReplies: cont.quickReplies,
+      state
+    };
+  }
+
+  // 6) If they directly type an email with “email” while mid-flow, update without reset
+  const em = extractEmail(txt);
+  if (em && /(email)/i.test(txt) && state.step && state.step !== "collect_email") {
+    state.email = em;
+    const cont = repromptForStep(state);
+    return {
+      reply: `Got it — I updated your email.\n\n${cont.reply}`,
+      quickReplies: cont.quickReplies,
+      state
+    };
+  }
+
+  return null;
 }
 
 /* ========================= CORE POST HANDLER ========================= */
@@ -642,16 +799,28 @@ async function handleCorePOST(req, res) {
       return originalJson(out);
     };
 
-    if (body.init || (!user && !state.step)) return res.status(200).json(intro());
-    if (!state.step && user) return res.status(200).json(intro());
+    // Init
+    if (body.init || (!user && !state.step)) return res.status(200).json(intro(state));
     if (!user) return res.status(200).json(repromptForStep(state));
+
+    // ✅ NEW: if state.step missing but user typed details, auto-start from message
+    if (!state.step && user) {
+      const started = autoStartFromMessage(user, state);
+      return res.status(200).json(started);
+    }
+
+    // ✅ NEW: global interrupts (questions + edits) WITHOUT resetting the flow
+    const interrupt = handleGlobalInterrupts(user, msg, state);
+    if (interrupt) return res.status(200).json(interrupt);
 
     switch (state.step) {
       case "choose_service": {
-        let choice = null;
-        if (/duct|air\s*duct/.test(msg)) choice = "duct";
-        if (/(upholstery|sectional|sofa|loveseat|recliner|ottoman|chair|mattress)/.test(msg)) choice = "upholstery";
-        if (/(carpet|rooms?|hall|stairs|flight|rugs?)/.test(msg)) choice = "carpet";
+        // ✅ NEW: If they typed areas/items, jump straight to pricing
+        const started = autoStartFromMessage(user, state);
+        if (started && started.state?.step !== "choose_service") return res.status(200).json(started);
+
+        // Otherwise normal choose_service
+        const choice = detectServiceFromText(msg);
         if (!choice) return res.status(200).json({ reply: "Please choose a service.", quickReplies: SERVICE_CHOICES, state });
 
         if (choice === "carpet") {
@@ -666,7 +835,7 @@ async function handleCorePOST(req, res) {
         return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic", "Deep"], state });
       }
 
-      /* ========================= Carpet Flow (restored) ========================= */
+      /* ========================= Carpet Flow ========================= */
       case "carpet_details": {
         const parsed = parseAreas(user);
         if (!parsed.billable) {
@@ -687,7 +856,6 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "No problem — tell me the carpet areas again.", state });
         }
 
-        // ✅ If we already have upholstery or duct, show combined summary BEFORE ZIP
         if (state.upholstery?.total || state.duct?.total) {
           state.step = "confirm_combined_proceed";
           return res.status(200).json({
@@ -697,7 +865,6 @@ async function handleCorePOST(req, res) {
           });
         }
 
-        // Otherwise offer upholstery discount upsell (LOCKED behavior)
         state.step = "uph_upsell_offer";
         return res.status(200).json({
           reply: "Nice — since you’re booking carpet, you’re eligible for **$50 off upholstery**. Want to add upholstery cleaning?",
@@ -710,11 +877,10 @@ async function handleCorePOST(req, res) {
         if (/^no\b|skip/i.test(msg)) {
           return res.status(200).json(promptAddress(state));
         }
-        state.addingUphAfterCarpet = true; // ✅ needed for bundle discount eligibility
+        state.addingUphAfterCarpet = true;
         state.step = "upholstery_details";
         return res.status(200).json({ reply: "Great — what upholstery pieces would you like cleaned?", quickReplies: UPH_CHOICES, state });
       }
-      /* ======================================================== */
 
       /* ========================= Upholstery Flow ========================= */
       case "upholstery_details": {
@@ -750,7 +916,7 @@ async function handleCorePOST(req, res) {
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your upholstery total is **$${parsed.total}** for ${parsed.breakdown.join(", ")}.\n\nProceed with upholstery?`,
-          quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
+          quickReplies: ["Proceed", "Change items"],
           state
         });
       }
@@ -767,10 +933,6 @@ async function handleCorePOST(req, res) {
 
         const target = (state._cushionTarget || "sofa").toLowerCase();
 
-        // Rule set:
-        // - 4+ cushions => sectional pricing
-        // - sofa: 1–3 => sofa
-        // - loveseat: 1–2 => loveseat, 3 => sofa, 4+ => sectional
         let items;
         if (cushions >= 4) {
           items = [{ type: "sectional", seats: cushions }];
@@ -787,7 +949,7 @@ async function handleCorePOST(req, res) {
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your upholstery total is **$${priced.total}** for ${priced.breakdown.join(", ")}.\n\nProceed with upholstery?`,
-          quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
+          quickReplies: ["Proceed", "Change items"],
           state
         });
       }
@@ -801,7 +963,7 @@ async function handleCorePOST(req, res) {
         state.step = "upholstery_confirm";
         return res.status(200).json({
           reply: `Your sectional price is **$${merged.total}**.\n\nProceed with upholstery?`,
-          quickReplies: ["Proceed", "Change items"], // ✅ NO SKIP (price confirm)
+          quickReplies: ["Proceed", "Change items"],
           state
         });
       }
@@ -812,7 +974,6 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "No problem — tell me the upholstery pieces again.", quickReplies: UPH_CHOICES, state });
         }
 
-        // ✅ If carpet already exists (Carpet→Uph bundle), show combined summary BEFORE ZIP
         if (state.carpet?.price || state.duct?.total) {
           state.step = "confirm_combined_proceed";
           return res.status(200).json({
@@ -822,7 +983,6 @@ async function handleCorePOST(req, res) {
           });
         }
 
-        // ✅ Upholstery-only: upsell carpet BEFORE ZIP
         state.step = "carpet_upsell_offer";
         return res.status(200).json({
           reply: "Since you’re booking upholstery, you qualify for a free hallway at 4+ areas, and at 6+ areas you also get one room free. Want me to price carpet too?",
@@ -835,11 +995,10 @@ async function handleCorePOST(req, res) {
         if (/^no\b|skip/i.test(msg)) {
           return res.status(200).json(promptAddress(state));
         }
-        state.addingCarpetAfterUph = true; // ✅ needed for bundle discount eligibility
+        state.addingCarpetAfterUph = true;
         state.step = "carpet_details";
         return res.status(200).json({ reply: "Awesome — how many carpet areas should I price? (e.g., “3 rooms, hallway, 1 rug”).", state });
       }
-      /* ======================================================== */
 
       /* ========================= Combined bundle proceed ========================= */
       case "confirm_combined_proceed": {
@@ -869,7 +1028,7 @@ async function handleCorePOST(req, res) {
         return res.status(200).json({ reply: "Tap an option to change, or Cancel.", state });
       }
 
-      /* ========================= Duct Flow (locked behavior) ========================= */
+      /* ========================= Duct Flow ========================= */
       case "duct_package": {
         if (!/basic|deep/.test(msg)) {
           return res.status(200).json({ reply: ductIntroCopy(), quickReplies: ["Basic", "Deep"], state });
@@ -887,14 +1046,12 @@ async function handleCorePOST(req, res) {
       }
 
       case "duct_add_furnace": {
-        // ✅ anchored "add" so "No add-ons" never matches
         state.duct.add.furnace = /^\s*add\b/i.test(user);
         state.step = "duct_add_dryer";
         return res.status(200).json({ reply: dryerVentCopy, quickReplies: ["Add dryer vent", "No add-ons"], state });
       }
 
       case "duct_add_dryer": {
-        // ✅ anchored "add" so "No add-ons" never matches
         state.duct.add.dryer = /^\s*add\b/i.test(user);
 
         const base = state.duct.pkg === "Deep" ? 500 : 200;
@@ -909,7 +1066,7 @@ async function handleCorePOST(req, res) {
 
         return res.status(200).json({
           reply: `Your **${state.duct.pkg}** duct cleaning total is **$${total}** (${state.duct.systems} system${state.duct.systems > 1 ? "s" : ""}${furn}${dry}). Proceed?`,
-          quickReplies: ["Proceed", "Change"], // ✅ NO SKIP (price confirm)
+          quickReplies: ["Proceed", "Change"],
           state
         });
       }
@@ -931,7 +1088,7 @@ async function handleCorePOST(req, res) {
 
         if (!VALID_ZIP_SET || !zipInArea(zip)) {
           state.zipVerified = false;
-          state.step = "ooa_collect_phone"; // ✅ OOA starts here
+          state.step = "ooa_collect_phone";
           return res.status(200).json({
             reply:
               "Thanks! Unfortunately, that ZIP looks **outside our service area**.\n" +
@@ -952,9 +1109,13 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: 'Please provide your **full service address** (street + city + state). Example: "2314 College St Atlanta GA"', state });
         }
 
-        // keep address
         state.address = user.trim().replace(/\s{2,}/g, " ");
         state.Address = state.address;
+
+        if (state._editing) {
+          const cont = exitEditModeAndResume(state);
+          return res.status(200).json({ reply: `Updated.\n\n${cont.reply}`, quickReplies: cont.quickReplies, state: cont.state });
+        }
 
         state.step = "collect_name";
         return res.status(200).json(promptName(state));
@@ -965,14 +1126,25 @@ async function handleCorePOST(req, res) {
           return res.status(200).json({ reply: "Please provide your **first and last name**.", state });
         }
         state.name = user.trim();
-        // ✅ continue booking
+
+        if (state._editing) {
+          const cont = exitEditModeAndResume(state);
+          return res.status(200).json({ reply: `Updated.\n\n${cont.reply}`, quickReplies: cont.quickReplies, state: cont.state });
+        }
+
         return res.status(200).json(promptPhone(state));
       }
 
       case "collect_phone": {
-        const digits = (user.match(/\d/g) || []).join("");
-        if (digits.length !== 10) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
+        const digits = extractTenDigit(user);
+        if (!digits) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
         state.phone = digits;
+
+        // ✅ If editing, do NOT resend zaps; just resume flow
+        if (state._editing) {
+          const cont = exitEditModeAndResume(state);
+          return res.status(200).json({ reply: `Updated.\n\n${cont.reply}`, quickReplies: cont.quickReplies, state: cont.state });
+        }
 
         // ✅ Session/Partial Zap once we have name + phone (normal in-area flow)
         if (!state._sessionSent) {
@@ -1004,8 +1176,15 @@ async function handleCorePOST(req, res) {
       }
 
       case "collect_email": {
-        if (!/^[\w.\-+]+@[\w.\-]+\.\w{2,}$/i.test(user)) return res.status(200).json({ reply: "Please enter a valid email address.", state });
-        state.email = user.trim();
+        const em = extractEmail(user);
+        if (!em) return res.status(200).json({ reply: "Please enter a valid email address.", state });
+        state.email = em;
+
+        if (state._editing) {
+          const cont = exitEditModeAndResume(state);
+          return res.status(200).json({ reply: `Updated.\n\n${cont.reply}`, quickReplies: cont.quickReplies, state: cont.state });
+        }
+
         state.step = "collect_date";
         return res.status(200).json({ reply: "What day would you like the cleaning? (e.g., July 10 or 07/10)", state });
       }
@@ -1083,7 +1262,6 @@ async function handleCorePOST(req, res) {
         if (/^\s*no/i.test(user)) state.notes = "-";
         else state.notes = (user || "").trim() || "-";
 
-        // ✅ Booking Zap once booking is complete (notes captured)
         if (!state._bookingSent) {
           try {
             const bookingPayload = {
@@ -1126,10 +1304,10 @@ async function handleCorePOST(req, res) {
         });
       }
 
-      /* ========================= ✅ OOA FLOW (ONLY CHANGE) ========================= */
+      /* ========================= OOA FLOW ========================= */
       case "ooa_collect_phone": {
-        const digits = (user.match(/\d/g) || []).join("");
-        if (digits.length !== 10) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
+        const digits = extractTenDigit(user);
+        if (!digits) return res.status(200).json({ reply: "Please enter a valid **10-digit** phone number.", state });
         state.phone = digits;
 
         state.step = "ooa_collect_name";
@@ -1142,7 +1320,6 @@ async function handleCorePOST(req, res) {
         }
         state.name = user.trim();
 
-        // Send Session/Partial Zap for OOA lead (so Zapier can text)
         try {
           await sendSessionZapFormEncoded({
             Cleaning_Breakdown: buildCleaningBreakdownForZap(state),
@@ -1150,8 +1327,8 @@ async function handleCorePOST(req, res) {
             "Total Price": totalWithDiscount(state),
             name2025: state.name || "",
             phone2025: state.phone || "",
-            email2025: "",              // OOA: we do NOT collect email
-            Address: "",                // OOA: we do NOT collect address
+            email2025: "",
+            Address: "",
             date: "",
             Window: "",
             pets: "",
@@ -1164,7 +1341,6 @@ async function handleCorePOST(req, res) {
           console.error("OOA Session Zap send failed", e);
         }
 
-        // Stop and reset (no more questions)
         const ph = state.phone || "";
         const nm = state.name || "";
         state = { step: "choose_service", faqLog: state.faqLog || [] };
@@ -1177,10 +1353,9 @@ async function handleCorePOST(req, res) {
           state
         });
       }
-      /* ======================================================== */
 
       default:
-        return res.status(200).json(intro());
+        return res.status(200).json(intro(state));
     }
   } catch (err) {
     console.error("chat.js error", err);
@@ -1296,4 +1471,4 @@ async function sendSessionZapFormEncoded(payload) {
   } catch (err) {
     console.error("Session Zap failed", err);
   }
-        }
+}
