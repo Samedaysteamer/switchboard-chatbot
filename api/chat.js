@@ -1,9 +1,8 @@
 // Same Day Steamerz — robust ManyChat + Web handler (UPDATED)
 // LOCKED: ZIP gate + bundle discount + duct pricing
-// SURGICAL ADD (NEW): (A) LLM Router (interrupts-only) behind kill-switch
-//                     (B) FAQ + live conversation answers without breaking state machine
-//                     (C) Edit-mode resume (change email/phone/address/date/window mid-flow)
-//                     (D) Booking continuation skips already-known fields (no retyping)
+// SURGICAL ADD: (A) Early FAQ/interrupt intercept (runs BEFORE step machine)
+//              (B) No pricing-math disclosure in FAQ answers (per your choice "1")
+//              (C) LLM Router remains OPTIONAL behind kill-switch (interrupts-only, fail-closed)
 // Existing FIXES KEPT: duct "No add-ons" never adds dryer, sofa/loveseat cushion gate (4+ => sectional),
 //                      no “Skip” on confirms, state_json hydration, bundle both directions, Zapier restored, OOA flow
 
@@ -664,6 +663,83 @@ function repromptForStep(state = {}) {
   }
 }
 
+/* ========================= NEW: FAQ/Interrupt Answers (NO pricing-math) ========================= */
+function answerFAQNoPricing(text = "") {
+  const t = String(text || "").toLowerCase().trim();
+
+  // Stanley Steemer
+  if (/(stanley\s*steem(?:er|ers)|is\s*this\s*stanley|are\s*you\s*stanley|stanley\s*steamer)/i.test(t)) {
+    return "No — this is Same Day Steamerz. We’re a locally owned company. Want a quick quote? Tell me what you need cleaned (carpet, upholstery, or air ducts).";
+  }
+
+  // Service area / location
+  if (/(do\s*you\s*service|service\s*area|do\s*you\s*cover|are\s*you\s*in|do\s*you\s*come\s*to|lithonia|lawrenceville|atlanta|snellville|loganville|decatur)/i.test(t) && (isQuestion(t) || /do\s*you\s*service/i.test(t))) {
+    return "Yes — we service most of Metro Atlanta and surrounding areas. What’s the ZIP code for the service location?";
+  }
+
+  // Time / clock
+  if (/(what\s*time\s*is\s*it|current\s*time|time\s*now)/i.test(t)) {
+    return "I don’t have a live clock in chat, but we schedule using arrival windows. (For example: 8 to 12 or 1 to 5.)";
+  }
+
+  // Dry time
+  if (/(dry\s*time|how\s*long.*dry|when.*dry)/i.test(t)) {
+    return "Typical dry time is about 4–8 hours, depending on airflow, humidity, and carpet thickness.";
+  }
+
+  // Pet/child safe
+  if (/(pet\s*safe|safe\s*for\s*pets|kid\s*safe|child\s*safe|baby\s*safe)/i.test(t)) {
+    return "Yes — our products are pet- and child-safe when used as directed, and we recommend good airflow while areas dry.";
+  }
+
+  // Furniture moving
+  if (/(move\s*furniture|do\s*you\s*move|move\s*sofa|move\s*bed|move\s*sectional)/i.test(t)) {
+    return "We can move small/light items. For large furniture (beds, dressers, big sectionals), we ask that those be moved ahead of time.";
+  }
+
+  // Stains / guarantee
+  if (/(stain|spots?|pet\s*stain|urine|odor|smell|guarantee)/i.test(t)) {
+    return "We treat most common spots and odors, but some staining can be permanent (like bleach, dye loss, or heavy wear). We’ll always do our best and let you know what’s realistic.";
+  }
+
+  // Process
+  if (/(how\s*does\s*this\s*work|what\s*process|steam|truck\s*mount|hot\s*water\s*extraction)/i.test(t)) {
+    return "We pre-treat, deep clean with hot-water extraction, then do a rinse pass. Most jobs are done in one visit, and we leave you with dry-time guidance.";
+  }
+
+  // Payment
+  if (/(payment|pay|cash|card|zelle|cashapp|cash\s*app|paypal)/i.test(t)) {
+    return "Payment is due at completion. We accept common payment methods including card and cash (and some digital options depending on the job).";
+  }
+
+  return "";
+}
+
+function maybeHandleEarlyFAQ(userText, state) {
+  const txt = String(userText || "").trim();
+  if (!txt) return null;
+
+  // Only intercept if it's clearly an FAQ/interrupt
+  const looksFAQ =
+    isQuestion(txt) ||
+    /(stanley|service\s*area|do\s*you\s*service|dry\s*time|pet\s*safe|move\s*furniture|stain|guarantee|what\s*time|time\s*is\s*it|payment|how\s*does\s*this\s*work|process)/i.test(txt);
+
+  if (!looksFAQ) return null;
+
+  const ans = answerFAQNoPricing(txt);
+  if (!ans) return null;
+
+  // Keep user in the current step; append the current prompt only if answer didn't already ask a question.
+  const rep = repromptForStep(state);
+  const answerEndsWithQuestion = /\?\s*$/.test(ans);
+
+  // If FAQ answer already asks a question (e.g., ZIP), do NOT append another question.
+  if (answerEndsWithQuestion) return { reply: ans, state };
+
+  const nextPrompt = rep?.reply ? `\n\n${rep.reply}` : "";
+  return { reply: ans + nextPrompt, quickReplies: rep?.quickReplies, state };
+}
+
 /* ========================= NEW: Intent + Auto-start ========================= */
 function detectServiceFromText(msgLower = "") {
   const m = String(msgLower || "");
@@ -675,6 +751,16 @@ function detectServiceFromText(msgLower = "") {
 
 function autoStartFromMessage(userText, state) {
   const carpetParsed = parseAreas(userText);
+  const uphParsed = parseUph(userText);
+
+  // If they typed BOTH carpet + upholstery in one message, capture both and go to combined confirm (no bundle discount flags set)
+  if (carpetParsed?.billable && uphParsed?.breakdown?.length) {
+    state.carpet = carpetParsed;
+    state.upholstery = { total: uphParsed.total, breakdown: uphParsed.breakdown };
+    state.step = "confirm_combined_proceed";
+    return { reply: combinedBundleSummary(state), quickReplies: ["Proceed", "Change items"], state };
+  }
+
   if (carpetParsed?.billable) {
     state.carpet = carpetParsed;
     state.step = "carpet_confirm";
@@ -685,7 +771,6 @@ function autoStartFromMessage(userText, state) {
     };
   }
 
-  const uphParsed = parseUph(userText);
   if (uphParsed?.breakdown?.length) {
     state.upholstery = { total: uphParsed.total, breakdown: uphParsed.breakdown };
     state.step = "upholstery_confirm";
@@ -700,7 +785,7 @@ function autoStartFromMessage(userText, state) {
   return intro(state);
 }
 
-/* ========================= NEW: Edit mode (resume where you left off) ========================= */
+/* ========================= Edit mode (resume where you left off) ========================= */
 function startEditMode(state, resumeStep, targetStep, question, quickReplies) {
   state._editing = true;
   state._resumeStep = resumeStep || "choose_service";
@@ -721,40 +806,24 @@ function handleDeterministicInterrupts(user, msgLower, state) {
   const txt = String(user || "").trim();
   const m = String(msgLower || "");
 
-  // (1) Stanley Steemer
-  if (/(stanley\s*steemer|is\s*this\s*stanley|are\s*you\s*stanley)/i.test(txt)) {
-    const cont = repromptForStep(state);
-    return {
-      reply:
-        "No — this is Same Day Steamerz. We’re a locally owned company.\n\n" +
-        (cont?.reply || "How can we help?"),
-      quickReplies: cont.quickReplies,
-      state
-    };
+  // Allow service switching mid-step (surgical improvement, no pricing logic change)
+  const svc = detectServiceFromText(m);
+  if (svc && state.step) {
+    if (svc === "upholstery" && (state.step === "carpet_details" || state.step === "carpet_confirm")) {
+      state.step = "upholstery_details";
+      return { reply: "Sure — what upholstery pieces would you like cleaned?", quickReplies: UPH_CHOICES, state };
+    }
+    if (svc === "carpet" && (state.step === "upholstery_details" || state.step === "upholstery_confirm")) {
+      state.step = "carpet_details";
+      return { reply: "Sure — what carpet areas would you like cleaned? (e.g., “3 rooms, hallway, stairs”).", state };
+    }
+    if (svc === "duct" && (state.step === "carpet_details" || state.step === "carpet_confirm" || state.step === "upholstery_details" || state.step === "upholstery_confirm")) {
+      state.step = "duct_package";
+      return { reply: ductIntroCopy(), quickReplies: ["Basic", "Deep"], state };
+    }
   }
 
-  // (2) Service-area question
-  if (/(do\s*you\s*service|service\s*area|are\s*you\s*in|do\s*you\s*cover|do\s*you\s*come\s*to)/i.test(txt) && isQuestion(txt)) {
-    // Ask ZIP (required anyway) and keep flow
-    state.step = "collect_zip";
-    return {
-      reply: "Yes — we service most of Metro Atlanta and surrounding areas. What’s the ZIP code for the service location?",
-      state
-    };
-  }
-
-  // (3) “Two rooms for 100” / promo confusion
-  if (/(two\s*rooms?|2\s*rooms?).*(\b100\b|\$?100)/i.test(txt) || /(special|coupon|deal).*(\b100\b|\$?100)/i.test(txt)) {
-    const current = state?.carpet?.price ? `Your current quote is **$${state.carpet.price}**.` : "Our minimum is **$100**.";
-    return {
-      reply:
-        `${current} Depending on the layout, **two rooms and a hallway** can also price at $100.\n\nWould you like to update the areas, or keep it as-is?`,
-      quickReplies: ["Update areas", "Keep as-is"],
-      state: { ...state, step: "promo_area_choice" }
-    };
-  }
-
-  // (4) Explicit change requests → edit mode
+  // Explicit change requests → edit mode
   if (/(wrong\s*number|change\s*phone|update\s*phone|new\s*phone|wrong\s*phone)/i.test(txt)) {
     const resume = state.step || "choose_service";
     return startEditMode(state, resume, "collect_phone", "No problem — what’s the best phone number to reach you?", undefined);
@@ -780,7 +849,7 @@ function handleDeterministicInterrupts(user, msgLower, state) {
     return { reply: "Which time frame works best for you?", quickReplies: TIME_WINDOWS, state };
   }
 
-  // (5) If they paste phone/email mid-flow (no “change” keyword), update + continue
+  // If they paste phone/email mid-flow (no “change” keyword), update + continue
   const ten = extractTenDigit(txt);
   if (ten && state.step && state.step !== "collect_phone") {
     state.phone = ten;
@@ -805,7 +874,7 @@ function handleDeterministicInterrupts(user, msgLower, state) {
   return null;
 }
 
-/* ========================= NEW: LLM Router (interrupts-only, fail-closed) ========================= */
+/* ========================= LLM Router (optional; interrupts-only; fail-closed) ========================= */
 const ALLOWED_STEPS = new Set([
   "choose_service",
   "carpet_details","carpet_confirm","uph_upsell_offer",
@@ -815,20 +884,11 @@ const ALLOWED_STEPS = new Set([
   "duct_package","duct_systems","duct_add_furnace","duct_add_dryer","duct_confirm",
   "collect_zip","collect_address","collect_name","collect_phone","collect_email","collect_date","collect_window","collect_pets","collect_water","collect_building","collect_floor","collect_notes",
   "ooa_collect_phone","ooa_collect_name",
-  "promo_area_choice",
   "post_summary_offer"
 ]);
 
-function maskEmail(email = "") {
-  const e = String(email || "");
-  if (!e.includes("@")) return "";
-  const [u, d] = e.split("@");
-  const u2 = u.length <= 2 ? u[0] + "*" : u.slice(0,2) + "***";
-  return `${u2}@${d}`;
-}
-
 function summarizeStateForLLM(state = {}) {
-  const summary = {
+  return {
     step: state.step || "none",
     has: {
       name: !!state.name,
@@ -839,11 +899,6 @@ function summarizeStateForLLM(state = {}) {
       date: !!state.date,
       window: !!state.window
     },
-    masked: {
-      phone_last4: state.phone ? String(state.phone).slice(-4) : "",
-      email: state.email ? maskEmail(state.email) : "",
-      zip: state.zip ? String(state.zip) : ""
-    },
     services: {
       carpet_total: state.carpet?.price || 0,
       upholstery_total: state.upholstery?.total || 0,
@@ -851,29 +906,16 @@ function summarizeStateForLLM(state = {}) {
       combined_total: totalWithDiscount(state)
     }
   };
-  return summary;
 }
 
 function isLikelyInterrupt(msg = "", state = {}) {
   const t = String(msg || "").trim();
   if (!t) return false;
-
-  // Always treat questions as interrupt
   if (isQuestion(t)) return true;
-
-  // “Why / how / what” without question mark
   if (/^(why|how|what|do|does|can|is|are|would|should)\b/i.test(t)) return true;
-
-  // Mid-flow objections/corrections
   if (/(wrong|change|update|actually|instead|no i meant|that’s not right|typo)/i.test(t)) return true;
+  if (/(price|cost|special|deal|coupon|quote|too high|why|stanley|service area|lithonia|dry time|pet safe|move furniture|what time)/i.test(t)) return true;
 
-  // Pricing confusion / promo / quote questions
-  if (/(price|cost|special|deal|coupon|quote|too high|why)/i.test(t)) return true;
-
-  // Info/FAQ type
-  if (/(dry time|how long|pet safe|safe for pets|move furniture|stains|guarantee|refund|payment|cash|card|zelle|cash app|paypal)/i.test(t)) return true;
-
-  // Don’t call LLM on clean structured inputs when we’re collecting a field (unless it’s clearly a question)
   const step = state.step || "";
   if (
     ["collect_phone","collect_email","collect_zip","collect_name","collect_address","collect_date","collect_window","collect_floor","ooa_collect_phone","ooa_collect_name"]
@@ -881,7 +923,6 @@ function isLikelyInterrupt(msg = "", state = {}) {
   ) {
     return false;
   }
-
   return false;
 }
 
@@ -893,7 +934,6 @@ function extractOutputText(resp) {
   if (!resp || typeof resp !== "object") return "";
   if (typeof resp.output_text === "string" && resp.output_text.trim()) return resp.output_text.trim();
 
-  // Fallback: search output items for output_text
   const out = resp.output;
   if (Array.isArray(out)) {
     for (const item of out) {
@@ -918,41 +958,30 @@ async function callOpenAIRouter({ userText, state }) {
   const stateSummary = summarizeStateForLLM(state);
   const rep = repromptForStep(state);
 
-  // Strict JSON schema output (structured outputs via Responses API)
   const schema = {
     type: "object",
     additionalProperties: false,
     properties: {
-      action: {
-        type: "string",
-        enum: ["ANSWER", "JUMP_STEP", "REQUEST_EDIT", "NOOP"]
-      },
+      action: { type: "string", enum: ["ANSWER", "JUMP_STEP", "REQUEST_EDIT", "NOOP"] },
       reply: { type: "string" },
       jump_step: { type: "string" },
-      edit_target: {
-        type: "string",
-        enum: ["phone","email","address","date","window","name","zip","pets","outdoorWater","building","floor","notes","none"]
-      }
+      edit_target: { type: "string", enum: ["phone","email","address","date","window","name","zip","pets","outdoorWater","building","floor","notes","none"] }
     },
     required: ["action","reply"]
   };
 
   const instructions =
-    "You are the Same Day Steamerz Messenger Router. " +
-    "Your job is to handle user interruptions/questions in the middle of a booking flow, without restarting the flow. " +
-    "IMPORTANT RULES: " +
-    "1) Do NOT calculate prices. Do NOT change pricing logic. If asked about price, you may repeat totals already provided in state, or say you'll confirm after the areas are clarified. " +
-    "2) Keep responses short, friendly, and businesslike. " +
-    "3) End with at most ONE question that helps continue the current step. " +
-    "4) Output MUST match the JSON schema strictly. No extra keys. No markdown.";
+    "You are the Same Day Steamerz Messenger Router. Handle interruptions/questions mid-flow without restarting. " +
+    "CRITICAL RULES: " +
+    "1) DO NOT calculate prices. Do not invent numbers. Only repeat totals already in state if needed. " +
+    "2) DO NOT explain pricing math, per-area pricing, freebies, minimums, or discounts. " +
+    "3) Keep answers short and professional. " +
+    "4) End with at most ONE question that continues the flow. " +
+    "Return strict JSON only.";
 
   const input =
     `Context:\n` +
-    `${JSON.stringify({
-      state_summary: stateSummary,
-      current_step_prompt: rep?.reply || "",
-      quick_replies: rep?.quickReplies || []
-    })}\n\n` +
+    `${JSON.stringify({ state_summary: stateSummary, current_step_prompt: rep?.reply || "" })}\n\n` +
     `User message:\n${String(userText || "")}`;
 
   const body = {
@@ -966,35 +995,20 @@ async function callOpenAIRouter({ userText, state }) {
   try {
     const r = await fetch(`${OPENAI_API_BASE}/responses`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify(body),
       signal: ac.signal
     });
 
     const json = await r.json().catch(() => null);
     const outText = extractOutputText(json);
-    const parsed = safeJsonParse(outText) || json; // structured might already be object
+    const parsed = safeJsonParse(outText) || json;
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (e) {
+  } catch {
     return null;
   } finally {
     clearTimeout(to);
   }
-}
-
-function applyLLMDecisionToState(decision, state) {
-  // Only allow jump_step to existing steps
-  if (decision?.action === "JUMP_STEP") {
-    const s = String(decision.jump_step || "").trim();
-    if (s && ALLOWED_STEPS.has(s)) state.step = s;
-  }
-
-  // Request edit is mapped to edit mode deterministically
-  // (LLM cannot directly change values; it only routes)
-  return state;
 }
 
 function buildLLMResponsePayload(decision, state) {
@@ -1013,24 +1027,20 @@ function buildLLMResponsePayload(decision, state) {
     if (target === "date") { state._editing = true; state._resumeStep = resume; state.step = "collect_date"; return { reply: "No problem — what day would you like the cleaning? (e.g., July 10 or 07/10)", state }; }
     if (target === "window") { state._editing = true; state._resumeStep = resume; state.step = "collect_window"; return { reply: "Which time frame works best for you?", quickReplies: TIME_WINDOWS, state }; }
     if (target === "zip") { state._editing = true; state._resumeStep = resume; state.step = "collect_zip"; return { reply: "Sure — what’s the ZIP code for the service location?", state }; }
-    // fallback
-    const rep = repromptForStep(state);
-    return { reply: reply + "\n\n" + (rep?.reply || "How can we help?"), quickReplies: rep.quickReplies, state };
   }
 
   if (action === "JUMP_STEP") {
-    applyLLMDecisionToState(decision, state);
+    const s = String(decision.jump_step || "").trim();
+    if (s && ALLOWED_STEPS.has(s)) state.step = s;
     const rep = repromptForStep(state);
-    // If LLM already asked the needed question, keep as-is; otherwise append reprompt.
-    if (/\?$/.test(reply)) return { reply, quickReplies: rep.quickReplies, state };
-    return { reply: reply + "\n\n" + (rep?.reply || ""), quickReplies: rep.quickReplies, state };
+    if (/\?\s*$/.test(reply)) return { reply, quickReplies: rep.quickReplies, state };
+    return { reply: reply + (rep?.reply ? `\n\n${rep.reply}` : ""), quickReplies: rep.quickReplies, state };
   }
 
   if (action === "ANSWER") {
-    // Continue current flow: if reply doesn’t end with a question, append reprompt
     const rep = repromptForStep(state);
-    if (/\?$/.test(reply)) return { reply, quickReplies: rep.quickReplies, state };
-    return { reply: reply + "\n\n" + (rep?.reply || ""), quickReplies: rep.quickReplies, state };
+    if (/\?\s*$/.test(reply)) return { reply, quickReplies: rep.quickReplies, state };
+    return { reply: reply + (rep?.reply ? `\n\n${rep.reply}` : ""), quickReplies: rep.quickReplies, state };
   }
 
   return null;
@@ -1043,7 +1053,6 @@ function enforceSessionTTL(state) {
 
   const lastSeen = typeof state._lastSeen === "number" ? state._lastSeen : 0;
   if (lastSeen && now - lastSeen > ttlMs) {
-    // reset core booking data, keep faq log
     const keepFaq = Array.isArray(state.faqLog) ? state.faqLog : [];
     return { step: "choose_service", faqLog: keepFaq };
   }
@@ -1107,17 +1116,22 @@ async function handleCorePOST(req, res) {
     if (body.init || (!user && !state.step)) return res.status(200).json(intro(state));
     if (!user) return res.status(200).json(repromptForStep(state));
 
+    // ✅ EARLY FAQ/interrupt intercept (runs BEFORE any "missing step → intro" behavior)
+    // This is what makes it behave like your other bot without changing baseline logic.
+    const earlyFaq = maybeHandleEarlyFAQ(user, state.step ? state : { ...state, step: "choose_service" });
+    if (earlyFaq) return res.status(200).json(earlyFaq);
+
     // If step missing, auto-start from message (handles “3 rooms stairs” first message)
     if (!state.step) {
       const started = autoStartFromMessage(user, state);
       return res.status(200).json(started);
     }
 
-    // Deterministic interrupts first (zero-risk)
+    // Deterministic interrupts (edits + mid-flow service switches)
     const hardInterrupt = handleDeterministicInterrupts(user, msg, state);
     if (hardInterrupt) return res.status(200).json(hardInterrupt);
 
-    // LLM router (interrupts-only, fail-closed)
+    // Optional LLM router (interrupts-only, fail-closed)
     if (LLM_ROUTER_ENABLED && OPENAI_API_KEY && isLikelyInterrupt(user, state)) {
       const decision = await callOpenAIRouter({ userText: user, state });
       const payload = buildLLMResponsePayload(decision, state);
@@ -1127,17 +1141,7 @@ async function handleCorePOST(req, res) {
 
     // Normal state machine
     switch (state.step) {
-      case "promo_area_choice": {
-        if (/update/i.test(msg)) {
-          state.step = "carpet_details";
-          return res.status(200).json({ reply: "No problem — tell me the carpet areas again (e.g., “2 rooms, hallway, stairs”).", state });
-        }
-        state.step = "uph_upsell_offer";
-        return res.status(200).json({ reply: "Got it — we’ll keep it as-is.\n\nWant to add upholstery cleaning?", quickReplies: ["Yes, add upholstery", "No, skip"], state });
-      }
-
       case "choose_service": {
-        // If they typed areas/items, jump straight to confirm
         const started = autoStartFromMessage(user, state);
         if (started && started.state?.step !== "choose_service") return res.status(200).json(started);
 
@@ -1601,12 +1605,10 @@ async function handleCorePOST(req, res) {
           }
         }
 
-        // Continue to summary
         return res.status(200).json(promptNextBookingField(state));
       }
 
       case "post_summary_offer": {
-        // Keep state (no wipe) so add-on services don't require retyping within the session TTL.
         state.step = "choose_service";
         return res.status(200).json({
           reply: "Got it! If you need anything else, just say “carpet”, “upholstery”, or “ducts”.",
@@ -1782,4 +1784,4 @@ async function sendSessionZapFormEncoded(payload) {
   } catch (err) {
     console.error("Session Zap failed", err);
   }
-  }
+               }
