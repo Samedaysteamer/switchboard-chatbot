@@ -329,7 +329,7 @@ async function sendSessionZapFormEncoded(payload) {
   }
 }
 
-/* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks ===== */
+/* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks (NAME FIX INCLUDED) ===== */
 function _nonEmpty(v) {
   if (v == null) return false;
   if (typeof v === "number") return !Number.isNaN(v);
@@ -345,28 +345,63 @@ function _toNumber(v) {
   const n = parseFloat(String(v || "").replace(/[^\d.]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
+
 function _deriveFromHistory(state = {}) {
   const hist = Array.isArray(state._history) ? state._history : [];
   if (!hist.length) return {};
 
   const text = hist
-    .slice(-40)
+    .slice(-60)
     .map(m => `${m.role || ""}: ${String(m.content || "")}`)
     .join("\n");
 
   const out = {};
 
+  const looksLikeFullName = (v = "") => {
+    const s = String(v || "").trim();
+    if (!s) return false;
+    if (s.length > 60) return false;
+    if (/@|\d/.test(s)) return false;
+    if (/^(yes|no|house|apartment|basic|deep|proceed|finalize|carpet|upholstery|ducts?)$/i.test(s)) return false;
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return false;
+    if (parts.some(p => p.length < 2)) return false;
+    return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)+$/.test(s);
+  };
+
+  const assistantAskedForName = (t = "") =>
+    /\b(full\s+name|your\s+name|what(?:’|'|)s\s+your\s+name|name\?)\b/i.test(String(t || ""));
+
+  // Email
   const em = text.match(/[\w.\-+]+@[\w.\-]+\.\w{2,}/i);
   if (em) out.email = em[0].trim().toLowerCase();
 
+  // Phone
   const ph = text.match(/\b(?:\+?1[\s\-\.]?)?(\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})\b/);
   if (ph) {
     const d = extractTenDigit(ph[0]);
     if (d) out.phone = d;
   }
 
+  // ZIP
   const zip = text.match(/\b\d{5}\b/);
   if (zip) out.zip = zip[0];
+
+  // NAME (FIX): safe extraction
+  const nameLine = text.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)+)\b/i);
+  if (nameLine && looksLikeFullName(nameLine[1])) {
+    out.name = nameLine[1].trim();
+  } else {
+    for (let i = 0; i < hist.length - 1; i++) {
+      const a = hist[i];
+      const u = hist[i + 1];
+      if (a?.role === "assistant" && u?.role === "user") {
+        if (assistantAskedForName(a.content || "") && looksLikeFullName(u.content || "")) {
+          out.name = String(u.content || "").trim();
+        }
+      }
+    }
+  }
 
   // Window
   if (/(^|\b)8\s*(?:am)?\s*(?:-|to|–)\s*12\s*(?:pm)?(\b|$)/i.test(text)) out.window = "8 to 12";
@@ -390,7 +425,7 @@ function _deriveFromHistory(state = {}) {
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*,\s*[A-Za-z .'-]+,\s*(?:GA|Georgia)\s+\d{5}\b/i);
   if (addr) out.address = addr[0].trim();
 
-  // Date (prefer lines that mention date)
+  // Date
   const dateLine = text.match(/(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i);
   if (dateLine) out.date = dateLine[1].trim();
   else {
@@ -402,11 +437,11 @@ function _deriveFromHistory(state = {}) {
   const notesLine = text.match(/\bnotes?\s*[:\-]\s*([^\n]{1,140})/i);
   if (notesLine) out.notes = notesLine[1].trim();
 
-  // Total price (grab last total-looking amount)
+  // Total price
   const totals = [...text.matchAll(/\b(?:total|new\s+combined\s+total)\s*[:\-]?\s*\$?\s*(\d{2,5})\b/ig)];
   if (totals.length) out.total_price = _toNumber(totals[totals.length - 1][1]);
 
-  // Services inference (only if missing)
+  // Services inference
   const hasCarpet = /\bcarpet\b/i.test(text);
   const hasUph = /\bupholstery\b|\bcouch\b|\bsofa\b|\bloveseat\b|\bsectional\b/i.test(text);
   const hasDuct = /\bduct\b|\bair\s+duct\b|\bfurnace\b|\bdryer\s+vent\b/i.test(text);
@@ -478,121 +513,65 @@ function buildZapPayloadFromState(state = {}) {
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
 
-/* ========================= QUICK REPLY POLICY (ONLY UI LAYER) =========================
-   DO NOT touch state. DO NOT touch Zapier. This only overrides quickReplies arrays.
-   Goals:
-   - Remove quick replies on ZIP + Name
-   - Tight quick replies on Finalize + Notes
-   - Add date quick replies (today + next 5 days) at date question
-   - Add upholstery helper quick replies (examples + cushions/seat counts)
-   - Keep arrivals/pets/building/water as simple buttons
-============================================================================= */
+/* ========================= QUICK REPLIES (NEW): auto-infer if extractor doesn't provide ========================= */
+const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
+const QR_WINDOWS = ["8 to 12", "1 to 5"];
+const QR_PETS = ["No pets", "Yes, pets"];
+const QR_BUILDING = ["House", "Apartment"];
+const QR_WATER = ["Yes, outdoor water available", "No outdoor water"];
+const QR_NOTES = ["No special notes", "I have notes"];
+const QR_FINALIZE = ["Finalize booking", "Make changes"];
+const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
+const QR_PROCEED = ["Proceed", "No"];
 
-function _qrMMDD(d) {
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${mm}/${dd}`;
-}
+function inferQuickReplies(replyText = "") {
+  const t = String(replyText || "").toLowerCase();
 
-function buildNextDateQuickReplies(daysAhead = 5) {
-  // Use Atlanta time so “today” matches your tests
-  const tz = "America/New_York";
-  // Start from "today" in that timezone
-  const now = new Date();
-  // We format via locale with TZ, but do arithmetic with ms (good enough for day buttons)
-  const out = [];
-  for (let i = 0; i <= daysAhead; i++) {
-    const di = new Date(now.getTime() + i * 24 * 60 * 60 * 1000);
-    // Use locale date parts in timezone to avoid server TZ drift
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      month: "2-digit",
-      day: "2-digit"
-    }).formatToParts(di);
-    const mm = parts.find(p => p.type === "month")?.value || String(di.getMonth() + 1).padStart(2, "0");
-    const dd = parts.find(p => p.type === "day")?.value || String(di.getDate()).padStart(2, "0");
-    out.push(`${mm}/${dd}`);
-  }
-  out.push("Other date");
-  return out.slice(0, 13);
-}
-
-function applyQuickReplyPolicy(replyText, suggestedQuickReplies, state) {
-  const r = String(replyText || "").trim();
-  const rl = r.toLowerCase();
-
-  // Hard removals (LOCKED)
-  if (/(zip\s*code|zip\b)/i.test(r) && /\bzip\b/i.test(rl) && /\bcode\b/i.test(rl)) return [];
-  if (/(full\s+name|your\s+name|provide\s+your\s+name|can\s+i\s+have\s+your\s+name)/i.test(r)) return [];
-  if (/(email\s+address)/i.test(r)) return []; // must type
-
-  // Service chooser
-  if (/(what do you need cleaned today|need cleaned today)/i.test(r)) {
-    return ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
+  // service chooser
+  if (/(what do you need cleaned today|carpet,\s*upholstery,\s*or\s*air ducts|carpet\s+or\s+upholstery\s+or\s+air ducts)/i.test(replyText)) {
+    return QR_SERVICE.slice();
   }
 
-  // Upholstery entry: examples
-  if (/(what upholstery|what .*pieces.*cleaned|what .*pieces.*like cleaned|what pieces would you like cleaned)/i.test(r)) {
-    return ["Sofa", "Loveseat", "Sectional", "Recliner", "Ottoman", "Dining chairs", "Mattress", "Other"];
+  // arrival window
+  if (/(arrival window|which.*window|8 to 12|1 to 5)/i.test(replyText) && /8\s*to\s*12/i.test(replyText) && /1\s*to\s*5/i.test(replyText)) {
+    return QR_WINDOWS.slice();
   }
 
-  // Upholstery cushions / seats helpers
-  if (/(how many).*(cushion|cushions|seat|seats|people).*/i.test(r) && /(sofa|loveseat|sectional|couch)/i.test(r)) {
-    // Keep buttons short
-    return ["2", "3", "4", "5", "6", "7"];
+  // pets
+  if (/(any pets|pets we should know|do you have.*pets)/i.test(replyText)) {
+    return QR_PETS.slice();
   }
 
-  // Duct package choice: keep short
-  if (/(would you like).*(basic).*(deep)/i.test(r) || /\bbasic\b.*\bdeep\b/i.test(r) && /\bwould you like\b/i.test(r)) {
-    return ["Basic", "Deep"];
+  // building
+  if (/(house or apartment|is this a house|is it a house|apartment\?)/i.test(replyText)) {
+    return QR_BUILDING.slice();
   }
 
-  // Furnace / dryer add-ons: yes/no (avoid giant button labels)
-  if (/(furnace\s+cleaning)/i.test(r) && /\badd\b|\bwould you like\b/i.test(r)) return ["Yes", "No"];
-  if (/(dryer\s+vent)/i.test(r) && /\badd\b|\bwould you like\b/i.test(r)) return ["Yes", "No"];
-
-  // Date: today + next 5 days
-  if (/(what date|what day).*(cleaning|schedule|appointment)/i.test(r) || /(what date would you like)/i.test(r)) {
-    return buildNextDateQuickReplies(5);
+  // outdoor water
+  if (/(outdoor water|outside water|outside water supply|water supply)/i.test(replyText)) {
+    return QR_WATER.slice();
   }
 
-  // Arrival window
-  if (/(arrival window|arrival).*(8 to 12|1 to 5)/i.test(r) || /(which arrival window works best)/i.test(r)) {
-    return ["8 to 12", "1 to 5"];
+  // notes
+  if (/(special notes|special instructions|notes for|any notes|instructions for our team)/i.test(replyText)) {
+    return QR_NOTES.slice();
   }
 
-  // Pets
-  if (/(pets).*(home|house|there any pets|do you have any pets)/i.test(r) || /(any pets)/i.test(r)) {
-    return ["Yes", "No"];
+  // finalize prompt
+  if (/(change before i finalize|before i finalize|finalize this\?)/i.test(replyText)) {
+    return QR_FINALIZE.slice();
   }
 
-  // House/apartment
-  if (/(house or an apartment|house or apartment|is this a house|is it a house|apartment)/i.test(r) && /\bhouse\b/i.test(rl)) {
-    return ["House", "Apartment"];
+  // duct upsell
+  if (/(add.*duct|duct cleaning|air duct)/i.test(replyText) && /(would you like|before you go|add as well)/i.test(replyText)) {
+    return QR_DUCT_UPSELL.slice();
   }
 
-  // Outdoor water
-  if (/(outdoor water|outside water|water supply).*(available|access|use|technicians)/i.test(r)) {
-    return ["Yes", "No"];
+  // generic proceed
+  if (/\bproceed\??\b/i.test(replyText) || /\bwould you like to proceed\b/i.test(replyText)) {
+    return QR_PROCEED.slice();
   }
 
-  // Notes
-  if (/(notes|special instructions|anything else we should know|anything we should be aware)/i.test(r)) {
-    // If they are being asked to type notes, do NOT show quick replies
-    // But if it’s a yes/no gate, show 2 options
-    if (/(type|please type|enter|write)/i.test(r)) return [];
-    return ["Yes, I have notes", "No"];
-  }
-
-  // Final confirmation / finalize
-  if (/(change before i finalize|before i finalize|finalize this|finalize your booking)/i.test(r)) {
-    return ["Yes, finalize", "No, change something"];
-  }
-
-  // Default: keep whatever model/extractor suggested (but cap)
-  if (Array.isArray(suggestedQuickReplies) && suggestedQuickReplies.length) {
-    return suggestedQuickReplies.slice(0, 13);
-  }
   return [];
 }
 
@@ -765,6 +744,7 @@ Rules:
 - total_price: number (no $ sign)
 - selected_service: "Carpet" or "Upholstery" or "Air Duct" or combinations like "Carpet + Upholstery"
 - Cleaning_Breakdown: short text summary of services and counts for Zapier.
+- post_booking_duct_upsell_done: boolean (set true if an after-finalization duct upsell was already offered)
 - If you are unsure of a field, do not guess—leave it unchanged.
 `.trim();
 
@@ -861,7 +841,6 @@ async function llmTurn(userText, state) {
   // Provide lightweight state + zip signal (does NOT force JSON replies)
   const stateSnapshot = (() => {
     const copy = { ...s };
-    // remove huge internals before sending
     delete copy._history;
     return copy;
   })();
@@ -919,14 +898,11 @@ async function llmTurn(userText, state) {
     const z = normalizeZip(s.zip);
     if (z) s.zip = z;
   }
-  if (typeof s.window === "string") {
-    const w = s.window.trim();
-    if (w !== "8 to 12" && w !== "1 to 5") {
-      // leave as-is if invalid; prompt will correct next turn
-    }
-  }
 
-  return { reply: assistantReply || "How can I help?", quickReplies, state: s };
+  // If extractor did not provide quick replies, infer from assistant text
+  const inferred = (quickReplies && quickReplies.length) ? quickReplies : inferQuickReplies(assistantReply);
+
+  return { reply: assistantReply || "How can I help?", quickReplies: inferred, state: s };
 }
 
 /* ========================= CORE POST HANDLER ========================= */
@@ -974,11 +950,12 @@ async function handleCorePOST(req, res) {
       const initTurn = await llmTurn("hello", state);
       state = initTurn.state || state;
 
-      const qr = applyQuickReplyPolicy(initTurn.reply, initTurn.quickReplies, state);
+      // force service quick replies on init if none
+      const qrs = (initTurn.quickReplies && initTurn.quickReplies.length) ? initTurn.quickReplies : QR_SERVICE;
 
       return res.status(200).json({
         reply: initTurn.reply,
-        quickReplies: qr,
+        quickReplies: qrs,
         state
       });
     }
@@ -986,12 +963,9 @@ async function handleCorePOST(req, res) {
     if (!user) {
       const emptyTurn = await llmTurn("hello", state);
       state = emptyTurn.state || state;
-
-      const qr = applyQuickReplyPolicy(emptyTurn.reply, emptyTurn.quickReplies, state);
-
       return res.status(200).json({
         reply: emptyTurn.reply,
-        quickReplies: qr,
+        quickReplies: emptyTurn.quickReplies,
         state
       });
     }
@@ -1025,12 +999,37 @@ async function handleCorePOST(req, res) {
       }
     }
 
-    // ✅ Quick reply override (UI-only; does not touch state)
-    const qr = applyQuickReplyPolicy(result.reply, result.quickReplies, nextState);
+    // ===================== POST-BOOKING DUCT UPSELL (NEW) =====================
+    // After a finalized booking confirmation, offer duct cleaning ONCE (only if ducts not already included).
+    let finalReply = result.reply;
+    let finalQuickReplies = Array.isArray(result.quickReplies) ? result.quickReplies : [];
+
+    const svc = String(nextState.selected_service || nextState.selectedService || nextState["selected service"] || "");
+    const bd = String(nextState.Cleaning_Breakdown || nextState.cleaning_breakdown || nextState.breakdown || "");
+    const ductAlready = /duct/i.test(svc) || /duct/i.test(bd);
+
+    const looksFinalized = /finaliz/i.test(finalReply || "") || /dispatcher/i.test(finalReply || "") || /678-929-8202/.test(finalReply || "");
+    const upsellDone = !!(nextState.post_booking_duct_upsell_done);
+
+    if (bookingComplete && looksFinalized && !ductAlready && !upsellDone) {
+      finalReply =
+        String(finalReply || "").trim() +
+        "\n\nBefore you go — would you like to add air duct cleaning as well?";
+
+      finalQuickReplies = QR_DUCT_UPSELL.slice();
+
+      nextState.post_booking_duct_upsell_done = true;
+    }
+    // ========================================================================
+
+    // If still no quick replies, infer them
+    if (!finalQuickReplies || !finalQuickReplies.length) {
+      finalQuickReplies = inferQuickReplies(finalReply);
+    }
 
     return res.status(200).json({
-      reply: result.reply,
-      quickReplies: qr,
+      reply: finalReply,
+      quickReplies: finalQuickReplies,
       state: nextState
     });
   } catch (err) {
