@@ -329,24 +329,154 @@ async function sendSessionZapFormEncoded(payload) {
   }
 }
 
+/* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks ===== */
+function _nonEmpty(v) {
+  if (v == null) return false;
+  if (typeof v === "number") return !Number.isNaN(v);
+  const s = String(v).trim();
+  return s.length > 0;
+}
+function _first(...vals) {
+  for (const v of vals) if (_nonEmpty(v)) return v;
+  return "";
+}
+function _toNumber(v) {
+  if (typeof v === "number" && !Number.isNaN(v)) return v;
+  const n = parseFloat(String(v || "").replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function _deriveFromHistory(state = {}) {
+  const hist = Array.isArray(state._history) ? state._history : [];
+  if (!hist.length) return {};
+
+  const text = hist
+    .slice(-40)
+    .map(m => `${m.role || ""}: ${String(m.content || "")}`)
+    .join("\n");
+
+  const out = {};
+
+  const em = text.match(/[\w.\-+]+@[\w.\-]+\.\w{2,}/i);
+  if (em) out.email = em[0].trim().toLowerCase();
+
+  const ph = text.match(/\b(?:\+?1[\s\-\.]?)?(\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})\b/);
+  if (ph) {
+    const d = extractTenDigit(ph[0]);
+    if (d) out.phone = d;
+  }
+
+  const zip = text.match(/\b\d{5}\b/);
+  if (zip) out.zip = zip[0];
+
+  // Window
+  if (/(^|\b)8\s*(?:am)?\s*(?:-|to|–)\s*12\s*(?:pm)?(\b|$)/i.test(text)) out.window = "8 to 12";
+  if (/(^|\b)1\s*(?:pm)?\s*(?:-|to|–)\s*5\s*(?:pm)?(\b|$)/i.test(text)) out.window = "1 to 5";
+
+  // Building
+  if (/\bapartment\b/i.test(text)) out.building = "Apartment";
+  if (/\bhouse\b/i.test(text)) out.building = "House";
+
+  // Pets
+  if (/\bno\s+pets?\b/i.test(text) || /\bpets?\s*[:\-]\s*no\b/i.test(text)) out.pets = "No";
+  if (/\byes\b.*\bpets?\b/i.test(text) || /\bpets?\s*[:\-]\s*yes\b/i.test(text)) out.pets = "Yes";
+
+  // Outdoor water
+  if (/\bno\b.*\boutdoor\s+water\b/i.test(text) || /\boutdoor\s+water\b.*\bno\b/i.test(text)) out.outdoorWater = "No";
+  if (/\boutdoor\s+water\b.*\b(yes|available|access)\b/i.test(text) || /\bwater\s+spig(?:ot|got)\b/i.test(text)) out.outdoorWater = "Yes";
+
+  // Address (best-effort; only used if state is blank)
+  const addr =
+    text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*\s+(?:[A-Za-z .'-]+)\s+(?:GA|Georgia)\s+\d{5}\b/i) ||
+    text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*,\s*[A-Za-z .'-]+,\s*(?:GA|Georgia)\s+\d{5}\b/i);
+  if (addr) out.address = addr[0].trim();
+
+  // Date (prefer lines that mention date)
+  const dateLine = text.match(/(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i);
+  if (dateLine) out.date = dateLine[1].trim();
+  else {
+    const md = text.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/);
+    if (md) out.date = md[1].trim();
+  }
+
+  // Notes
+  const notesLine = text.match(/\bnotes?\s*[:\-]\s*([^\n]{1,140})/i);
+  if (notesLine) out.notes = notesLine[1].trim();
+
+  // Total price (grab last total-looking amount)
+  const totals = [...text.matchAll(/\b(?:total|new\s+combined\s+total)\s*[:\-]?\s*\$?\s*(\d{2,5})\b/ig)];
+  if (totals.length) out.total_price = _toNumber(totals[totals.length - 1][1]);
+
+  // Services inference (only if missing)
+  const hasCarpet = /\bcarpet\b/i.test(text);
+  const hasUph = /\bupholstery\b|\bcouch\b|\bsofa\b|\bloveseat\b|\bsectional\b/i.test(text);
+  const hasDuct = /\bduct\b|\bair\s+duct\b|\bfurnace\b|\bdryer\s+vent\b/i.test(text);
+  const svcs = [];
+  if (hasCarpet) svcs.push("Carpet");
+  if (hasUph) svcs.push("Upholstery");
+  if (hasDuct) svcs.push("Air Duct");
+  if (svcs.length) out.selected_service = svcs.join(" + ");
+
+  // Cleaning breakdown best-effort
+  const bd = [];
+  if (hasCarpet) bd.push("Carpet cleaning");
+  if (hasUph) bd.push("Upholstery cleaning");
+  if (hasDuct) bd.push("Air duct cleaning");
+  if (bd.length) out.Cleaning_Breakdown = bd.join(" + ");
+
+  return out;
+}
+
 function buildZapPayloadFromState(state = {}) {
+  const d = _deriveFromHistory(state);
+
+  const name = _first(state.name, state.name2025, d.name);
+  const phoneRaw = _first(state.phone, state.phone2025, d.phone);
+  const phone = extractTenDigit(phoneRaw) || String(phoneRaw || "");
+  const email = String(_first(state.email, state.email2025, d.email)).toLowerCase();
+
+  const address = _first(state.address, state.Address, state.service_address, d.address);
+  const date = _first(state.date, state.cleaningDate, state.CleaningDate, d.date);
+  const window = _first(state.window, state.Window, state.arrival_window, state.arrivalWindow, d.window);
+
+  const pets = _first(state.pets, state.Pets, d.pets);
+  const outdoorWater = _first(state.outdoorWater, state.OutdoorWater, state.water, state.waterSupply, d.outdoorWater);
+  const building = _first(state.building, state.BuildingType, state.buildingType, d.building);
+  const notes = _first(state.notes, state.Notes, d.notes);
+
+  const cleaningBreakdown = _first(
+    state.Cleaning_Breakdown,
+    state.cleaning_breakdown,
+    state.breakdown,
+    d.Cleaning_Breakdown
+  );
+
+  const selectedService = _first(
+    state.selected_service,
+    state.selectedService,
+    state["selected service"],
+    d.selected_service
+  );
+
+  const totalPrice = _toNumber(_first(state.total_price, state.totalPrice, state.total, state["Total Price"], d.total_price));
+
   return {
-    Cleaning_Breakdown: state.Cleaning_Breakdown || "",
-    "selected service": state.selected_service || "",
-    "Total Price": typeof state.total_price === "number" ? state.total_price : 0,
-    name2025: state.name || "",
-    phone2025: state.phone || "",
-    email2025: state.email || "",
-    Address: state.address || "",
-    date: state.date || "",
-    Window: state.window || "",
-    pets: state.pets || "",
-    OutdoorWater: state.outdoorWater || "",
-    BuildingType: state.building || "",
-    Notes: state.notes || "",
+    Cleaning_Breakdown: cleaningBreakdown || "",
+    "selected service": selectedService || "",
+    "Total Price": totalPrice || 0,
+    name2025: name || "",
+    phone2025: phone || "",
+    email2025: email || "",
+    Address: address || "",
+    date: date || "",
+    Window: window || "",
+    pets: pets || "",
+    OutdoorWater: outdoorWater || "",
+    BuildingType: building || "",
+    Notes: notes || "",
     booking_complete: !!state.booking_complete
   };
 }
+/* ===== END ZAPIER FIX (ONLY) ===== */
 
 /* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) =========================
    IMPORTANT:
