@@ -288,22 +288,85 @@ async function sendSessionZapFormEncoded(payload) {
   }
 }
 
+/**
+ * ZAPIER FIX:
+ * - Keep your existing keys (name2025/phone2025/email2025)
+ * - Add ALL booking fields
+ * - Add multiple aliases (old zaps / filters often rely on slightly different field names)
+ */
 function buildZapPayloadFromState(state = {}) {
+  const total =
+    typeof state.total_price === "number" ? state.total_price :
+    (typeof state.total === "number" ? state.total : 0);
+
+  const selected =
+    state.selected_service || state.selectedService || state.service || state.Service || "";
+
+  const zip = state.zip || state.Zip || state.ZIP || "";
+  const address = state.address || state.Address || "";
+  const name = state.name || state.Name || "";
+  const phone = state.phone || state.Phone || "";
+  const email = state.email || state.Email || "";
+  const date = state.date || state.Date || "";
+  const window = state.window || state.Window || "";
+  const pets = state.pets || state.Pets || "";
+  const building = state.building || state.BuildingType || state.Building || "";
+  const floor = state.floor || state.Floor || "";
+  const outdoorWater = state.outdoorWater || state.OutdoorWater || state.outdoor_water || "";
+  const notes = state.notes || state.Notes || "";
+  const breakdown = state.Cleaning_Breakdown || state.cleaning_breakdown || state.breakdown || "";
+
+  const booking_complete = !!state.booking_complete;
+
   return {
-    Cleaning_Breakdown: state.Cleaning_Breakdown || state.cleaning_breakdown || state.breakdown || "",
-    "selected service": state.selected_service || state.selectedService || "",
-    "Total Price": typeof state.total_price === "number" ? state.total_price : (typeof state.total === "number" ? state.total : 0),
-    name2025: state.name || "",
-    phone2025: state.phone || "",
-    email2025: state.email || "",
-    Address: state.address || state.Address || "",
-    date: state.date || "",
-    Window: state.window || state.Window || "",
-    pets: state.pets || "",
-    OutdoorWater: state.outdoorWater || state.OutdoorWater || "",
-    BuildingType: state.building || state.BuildingType || "",
-    Notes: state.notes || state.Notes || "",
-    booking_complete: !!state.booking_complete
+    // ---- keep existing “2025” keys used by your zaps ----
+    name2025: name,
+    phone2025: phone,
+    email2025: email,
+
+    // ---- core standard keys (common mapping) ----
+    Cleaning_Breakdown: breakdown,
+    selected_service: selected,
+    total_price: total,
+    zip,
+    address,
+    name,
+    phone,
+    email,
+    date,
+    window,
+    pets,
+    building,
+    floor,
+    outdoorWater,
+    notes,
+    booking_complete,
+
+    // ---- legacy/alias keys (prevents “not parsing all info”) ----
+    "selected service": selected,
+    "Selected Service": selected,
+    Service: selected,
+
+    "Total Price": total,
+    Total: total,
+    total: total,
+
+    ZIP: zip,
+    Zip: zip,
+
+    Address: address,
+
+    Window: window,
+    ArrivalWindow: window,
+
+    Pets: pets,
+    BuildingType: building,
+    FloorLevel: floor,
+    OutdoorWater: outdoorWater,
+    Notes: notes,
+
+    // ---- helpful metadata (won’t break anything) ----
+    created_at: new Date().toISOString()
   };
 }
 
@@ -408,6 +471,19 @@ If user input is "__INIT__", greet and ask:
 "What do you need cleaned today: carpet, upholstery, or air ducts?"
 Provide quick replies:
 ["Carpet Cleaning","Upholstery Cleaning","Air Duct Cleaning"]
+
+SERVICE SELECTION (LOCKED - STOPS GREETING LOOP):
+If the user says any of these (case-insensitive), treat it as a valid selection and proceed WITHOUT re-asking the greeting:
+- "carpet", "carpet cleaning"
+- "upholstery", "upholstery cleaning"
+- "air ducts", "ducts", "duct cleaning", "air duct cleaning"
+When selected:
+- set state.selected_service to exactly one of:
+  "carpet" OR "upholstery" OR "duct"
+Then continue the correct flow:
+- carpet => ask areas needed (rooms/rugs/hallway/stairs)
+- upholstery => ask what pieces need cleaned
+- duct => ask: "How many HVAC systems (AC units) do you have?"
 
 ARRIVAL WINDOWS (LOCKED):
 Offer ONLY these two windows:
@@ -530,12 +606,12 @@ After ZIP verified in-area, collect in order (one question per message):
 7 Pets
 8 House or apartment
 9 Floor (if apartment)
-10 Outdoor water supply (that you can connect a garden hose to)
+10 Outdoor water supply (a water spicket that you can connect a garden hose to)
 11 Notes
 
 OUTDOOR WATER QUESTION (LOCKED TEXT):
 When you ask about outdoor water, ask exactly:
-"Do you have an outside water supply available? (that you can connect a garden hose to)"
+"Do you have an outside water supply available? (a water spicket that you can connect a garden hose to)"
 
 FINAL CONFIRMATION:
 Provide summary including Total: $___ then ask:
@@ -766,8 +842,6 @@ async function handleCorePOST(req, res) {
     // - Booking Zap once booking_complete true (and haven't sent)
     const bookingComplete = !!(nextState.booking_complete);
 
-    // Optional: if booking just became complete and model forgot to set upsell flag, keep it false.
-    // (Prompt controls the actual upsell message & setting post_booking_upsell_done.)
     if (!wasBookingComplete && bookingComplete && typeof nextState.post_booking_upsell_done !== "boolean") {
       nextState.post_booking_upsell_done = false;
     }
