@@ -184,25 +184,6 @@ function clampHistory(arr, maxLen = 18) {
   return a.slice(a.length - maxLen);
 }
 
-/* ===== SURGICAL NAME FIX (ONLY) ===== */
-function looksLikeFullName(text = "") {
-  const v = String(text || "").trim();
-  if (!v) return false;
-  if (v.length > 60) return false;
-  if (/@|\d/.test(v)) return false;
-  if (/^(yes|no|house|apartment|basic|deep|proceed|finalize|carpet|upholstery|ducts?)$/i.test(v)) return false;
-  const parts = v.split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return false;
-  if (parts.some(p => p.length < 2)) return false;
-  return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)+$/.test(v);
-}
-
-function prevAssistantAskedForName(prevAssistant = "") {
-  const t = String(prevAssistant || "");
-  return /\b(full\s+name|your\s+name|what(?:’|'|)s\s+your\s+name|name\?)\b/i.test(t);
-}
-/* ===== END SURGICAL NAME FIX (ONLY) ===== */
-
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -348,7 +329,7 @@ async function sendSessionZapFormEncoded(payload) {
   }
 }
 
-/* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks ===== */
+/* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks (NAME FIX INCLUDED) ===== */
 function _nonEmpty(v) {
   if (v == null) return false;
   if (typeof v === "number") return !Number.isNaN(v);
@@ -364,46 +345,90 @@ function _toNumber(v) {
   const n = parseFloat(String(v || "").replace(/[^\d.]/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
+
 function _deriveFromHistory(state = {}) {
   const hist = Array.isArray(state._history) ? state._history : [];
   if (!hist.length) return {};
 
   const text = hist
-    .slice(-40)
+    .slice(-60)
     .map(m => `${m.role || ""}: ${String(m.content || "")}`)
     .join("\n");
 
   const out = {};
 
+  const looksLikeFullName = (v = "") => {
+    const s = String(v || "").trim();
+    if (!s) return false;
+    if (s.length > 60) return false;
+    if (/@|\d/.test(s)) return false;
+    // avoid common non-name replies
+    if (/^(yes|no|house|apartment|basic|deep|proceed|finalize|carpet|upholstery|ducts?)$/i.test(s)) return false;
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return false;
+    if (parts.some(p => p.length < 2)) return false;
+    return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)+$/.test(s);
+  };
+
+  const assistantAskedForName = (t = "") =>
+    /\b(full\s+name|your\s+name|what(?:’|'|)s\s+your\s+name|name\?)\b/i.test(String(t || ""));
+
+  // Email
   const em = text.match(/[\w.\-+]+@[\w.\-]+\.\w{2,}/i);
   if (em) out.email = em[0].trim().toLowerCase();
 
+  // Phone
   const ph = text.match(/\b(?:\+?1[\s\-\.]?)?(\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})\b/);
   if (ph) {
     const d = extractTenDigit(ph[0]);
     if (d) out.phone = d;
   }
 
+  // ZIP
   const zip = text.match(/\b\d{5}\b/);
   if (zip) out.zip = zip[0];
 
+  // NAME (FIX): safe extraction
+  // 1) Look for "Name: First Last"
+  const nameLine = text.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)+)\b/i);
+  if (nameLine && looksLikeFullName(nameLine[1])) {
+    out.name = nameLine[1].trim();
+  } else {
+    // 2) Otherwise: user message immediately after assistant asked for name
+    for (let i = 0; i < hist.length - 1; i++) {
+      const a = hist[i];
+      const u = hist[i + 1];
+      if (a?.role === "assistant" && u?.role === "user") {
+        if (assistantAskedForName(a.content || "") && looksLikeFullName(u.content || "")) {
+          out.name = String(u.content || "").trim();
+        }
+      }
+    }
+  }
+
+  // Window
   if (/(^|\b)8\s*(?:am)?\s*(?:-|to|–)\s*12\s*(?:pm)?(\b|$)/i.test(text)) out.window = "8 to 12";
   if (/(^|\b)1\s*(?:pm)?\s*(?:-|to|–)\s*5\s*(?:pm)?(\b|$)/i.test(text)) out.window = "1 to 5";
 
+  // Building
   if (/\bapartment\b/i.test(text)) out.building = "Apartment";
   if (/\bhouse\b/i.test(text)) out.building = "House";
 
+  // Pets
   if (/\bno\s+pets?\b/i.test(text) || /\bpets?\s*[:\-]\s*no\b/i.test(text)) out.pets = "No";
   if (/\byes\b.*\bpets?\b/i.test(text) || /\bpets?\s*[:\-]\s*yes\b/i.test(text)) out.pets = "Yes";
 
+  // Outdoor water
   if (/\bno\b.*\boutdoor\s+water\b/i.test(text) || /\boutdoor\s+water\b.*\bno\b/i.test(text)) out.outdoorWater = "No";
   if (/\boutdoor\s+water\b.*\b(yes|available|access)\b/i.test(text) || /\bwater\s+spig(?:ot|got)\b/i.test(text)) out.outdoorWater = "Yes";
 
+  // Address (best-effort; only used if state is blank)
   const addr =
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*\s+(?:[A-Za-z .'-]+)\s+(?:GA|Georgia)\s+\d{5}\b/i) ||
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*,\s*[A-Za-z .'-]+,\s*(?:GA|Georgia)\s+\d{5}\b/i);
   if (addr) out.address = addr[0].trim();
 
+  // Date (prefer lines that mention date)
   const dateLine = text.match(/(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i);
   if (dateLine) out.date = dateLine[1].trim();
   else {
@@ -411,12 +436,15 @@ function _deriveFromHistory(state = {}) {
     if (md) out.date = md[1].trim();
   }
 
+  // Notes
   const notesLine = text.match(/\bnotes?\s*[:\-]\s*([^\n]{1,140})/i);
   if (notesLine) out.notes = notesLine[1].trim();
 
+  // Total price (grab last total-looking amount)
   const totals = [...text.matchAll(/\b(?:total|new\s+combined\s+total)\s*[:\-]?\s*\$?\s*(\d{2,5})\b/ig)];
   if (totals.length) out.total_price = _toNumber(totals[totals.length - 1][1]);
 
+  // Services inference (only if missing)
   const hasCarpet = /\bcarpet\b/i.test(text);
   const hasUph = /\bupholstery\b|\bcouch\b|\bsofa\b|\bloveseat\b|\bsectional\b/i.test(text);
   const hasDuct = /\bduct\b|\bair\s+duct\b|\bfurnace\b|\bdryer\s+vent\b/i.test(text);
@@ -426,6 +454,7 @@ function _deriveFromHistory(state = {}) {
   if (hasDuct) svcs.push("Air Duct");
   if (svcs.length) out.selected_service = svcs.join(" + ");
 
+  // Cleaning breakdown best-effort
   const bd = [];
   if (hasCarpet) bd.push("Carpet cleaning");
   if (hasUph) bd.push("Upholstery cleaning");
@@ -438,7 +467,7 @@ function _deriveFromHistory(state = {}) {
 function buildZapPayloadFromState(state = {}) {
   const d = _deriveFromHistory(state);
 
-  const name = _first(state.name, state.name2025);
+  const name = _first(state.name, state.name2025, d.name);
   const phoneRaw = _first(state.phone, state.phone2025, d.phone);
   const phone = extractTenDigit(phoneRaw) || String(phoneRaw || "");
   const email = String(_first(state.email, state.email2025, d.email)).toLowerCase();
@@ -487,11 +516,177 @@ function buildZapPayloadFromState(state = {}) {
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
 
-/* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) ========================= */
-const SDS_MASTER_PROMPT_TEXT = `...`.trim();
+/* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) =========================
+   IMPORTANT:
+   - This is the customer-facing behavior prompt.
+   - Keep it TEXT-FIRST (no JSON requirements) so Vercel behaves like OpenAI prompt testing.
+*/
+const SDS_MASTER_PROMPT_TEXT = `
+You are Agent 995 for Same Day Steamerz. You are a calm, confident booking and sales agent.
+Your job is to answer questions, give quotes, upsell correctly, and complete full bookings end-to-end.
+
+ABSOLUTE OUTPUT RULES (LOCKED)
+- ALL prices must be displayed in NUMBERS with $ (examples: $100, $150, $250, $500).
+- NEVER write prices in words.
+- NEVER explain pricing math or how prices are calculated.
+- NEVER mention internal rules like “per area”, “billable areas”, “free hallway”, etc.
+- Ask ONLY ONE question per message.
+- NEVER repeat a question if the customer already provided the needed info.
+- Keep responses short, confident, and booking-focused.
+- No emojis, EXCEPT inside the duct package block (must be exactly as provided).
+
+GREETING (LOCKED)
+Start with: “Good morning. What do you need cleaned today: carpet, upholstery, or air ducts?”
+
+ARRIVAL WINDOWS (LOCKED)
+Offer ONLY:
+- 8 to 12
+- 1 to 5
+Ask: “Which arrival window works best: 8 to 12 or 1 to 5?”
+
+CARPET PRICING (LOCKED)
+- Count areas: rooms + rugs + hallway (if mentioned) + stairs (per FULL FLIGHT only) + named extra areas (living room, den, etc.).
+- If user gives “steps” or “stairs” without flights, ask: “How many full flights of stairs are there?”
+- Standard is $50 per charged area with a $100 minimum.
+- Specials:
+  - Exactly 2 total areas => $100
+  - Exactly 6 total charged areas => $200
+  - Exactly “2 rooms and a hallway” with nothing else => $100
+- Hallway handling (internal): if hallway is mentioned and total areas mentioned is 4+, the first hallway is not charged. Do not reveal.
+
+UPHOLSTERY (LOCKED)
+Always ask what pieces they need cleaned first.
+If they say sofa/couch/loveseat/sectional: ask seat count:
+“How many people can it comfortably seat?”
+Treat sofa/couch/loveseat as seating pricing.
+Pricing:
+- Seating: $50 per seat
+- If seat count 1–3: minimum $150
+- If seat count 4+ OR it’s a sectional: minimum $250
+Other items:
+- Dining chair: $25 each (if they say “chairs” clarify dining vs single chairs before pricing)
+- Recliner: $80
+- Ottoman: $50
+- Mattress: $150
+Standalone upholstery minimum: $100 (if only small items subtotal < $100, charge $100).
+
+BUNDLE DISCOUNT + PROFIT PROTECTION (LOCKED)
+If BOTH carpet + upholstery are booked in the same conversation, apply -$50 to the combined total.
+If bundle is active and upholstery subtotal would be under $100, treat upholstery as $100 BEFORE applying the -$50.
+Never explain. Only show:
+“Bundle discount: -$50”
+“New combined total: $___”
+
+UPSELL ORDERING (LOCKED)
+After customer says YES to proceed on:
+- Carpet: offer upholstery ONCE before ZIP:
+“Before we move forward, if you bundle upholstery with carpet today, you qualify for $50 off the combined total. Would you like to add upholstery cleaning?”
+- Upholstery: offer carpet ONCE before ZIP:
+“Before we move forward, would you like me to quote carpet cleaning as well?”
+Duct cleaning: DO NOT upsell carpet/upholstery until AFTER booking is finalized.
+
+DUCT CLEANING (LOCKED ORDER)
+If customer selects duct cleaning:
+First ask: “How many HVAC systems (AC units) do you have?”
+Then present EXACT block:
+
+💨 Duct Cleaning Options
+
+✅ Basic Duct Cleaning
+
+This is ideal if your ducts have been cleaned within the last 1–2 years.
+
+Includes all supply vents  
+High-powered vacuum extraction  
+Removes normal dust and debris buildup  
+Does not include return vents  
+No system sanitizing  
+This is maintenance cleaning.
+
+
+---
+
+🔥 Deep Duct Cleaning
+
+This is a full system restoration service.
+
+Includes all supply vents  
+Includes all return vents  
+Agitation + negative air extraction  
+Full system sanitizing treatment  
+Cleans deeper buildup, pet dander, odors, and contaminants  
+
+This is recommended if:
+
+It’s been more than 2 years  
+You’ve never had it cleaned  
+You have pets, allergies, or noticeable dust issues
+
+Then ask: “Would you like Basic or Deep?”
+Pricing:
+- Basic: $200 per system
+- Deep: $500 per system
+Then ask add-ons one at a time:
+- Furnace: Basic $200 per system, Deep $100 per system
+- Dryer vent: $200
+Then give total and ask to proceed.
+
+DUCT + CARPET (LOCKED NOTE)
+If duct + carpet booked: it’s two separate work orders with different technicians, dispatcher confirms timing.
+
+ZIP GATE (LOCKED)
+Only ask ZIP after the customer agrees to proceed and any required pre-zip upsell is resolved.
+If ZIP is outside service area, collect only name + phone and stop.
+
+BOOKING QUESTION ORDER (LOCKED — one question per message)
+After in-area ZIP confirmed:
+1 Address
+2 Name
+3 Phone
+4 Email
+5 Date
+6 Arrival window (8 to 12 or 1 to 5)
+7 Pets
+8 House or apartment
+9 Floor (if apartment)
+10 Outdoor water supply
+11 Notes
+
+FINAL CONFIRMATION (LOCKED)
+Provide a clean summary including Total: $___ and ask:
+“Is there anything you’d like to change before I finalize this?”
+If they say no, finalize and include:
+“If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
+
+NON-SALES HARD STOP (LOCKED)
+If they mention reschedule/cancel/complaint/refund/past job:
+Say this is the sales line and they must contact dispatcher at 678-929-8202.
+Collect only name, phone, and a brief reason. End.
+`.trim();
 
 /* ========================= OPENAI: Extractor Prompt (JSON MODE) ========================= */
-const SDS_EXTRACTOR_PROMPT = `...`.trim();
+const SDS_EXTRACTOR_PROMPT = `
+You extract structured booking data from a conversation for Same Day Steamerz.
+
+Return a SINGLE JSON object ONLY with:
+{
+  "state_update": { ... },
+  "quick_replies": ["optional strings"]
+}
+
+Rules:
+- Keep previously known values from CURRENT_STATE unless new info replaces them.
+- Normalize:
+  - zip: 5-digit string
+  - phone: 10-digit string
+  - email: lowercase email
+  - window: exactly "8 to 12" or "1 to 5"
+- booking_complete: true ONLY when the appointment is confirmed/finalized.
+- total_price: number (no $ sign)
+- selected_service: "Carpet" or "Upholstery" or "Air Duct" or combinations like "Carpet + Upholstery"
+- Cleaning_Breakdown: short text summary of services and counts for Zapier.
+- If you are unsure of a field, do not guess—leave it unchanged.
+`.trim();
 
 /* ========================= OPENAI Call Helpers ========================= */
 function safeJsonExtract(text = "") {
@@ -574,22 +769,16 @@ async function llmTurn(userText, state) {
   const s = state && typeof state === "object" ? state : {};
   s._history = clampHistory(s._history, 18);
 
-  // ✅ SURGICAL: capture name only when previous assistant asked for it
-  if (!s.name) {
-    const prevAssistant =
-      [...s._history].reverse().find(m => m && m.role === "assistant" && typeof m.content === "string")?.content || "";
-    if (prevAssistantAskedForName(prevAssistant) && looksLikeFullName(userText)) {
-      s.name = String(userText || "").trim();
-    }
-  }
-
+  // Quietly hydrate from raw text (does not affect customer reply)
   hydrateStateFromUserText(userText, s);
 
   const zipHint = computeZipHint(s, userText);
 
+  // Build conversation messages like OpenAI prompt testing (text-first)
   const msgs = [];
   msgs.push({ role: "system", content: SDS_MASTER_PROMPT_TEXT });
 
+  // Provide lightweight state + zip signal (does NOT force JSON replies)
   const stateSnapshot = (() => {
     const copy = { ...s };
     delete copy._history;
@@ -598,6 +787,7 @@ async function llmTurn(userText, state) {
   msgs.push({ role: "system", content: `CURRENT_STATE: ${JSON.stringify(stateSnapshot)}` });
   msgs.push({ role: "system", content: `ZIP_CHECK: ${JSON.stringify(zipHint)}` });
 
+  // include recent conversation history so it behaves like OpenAI
   for (const m of s._history) {
     if (m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string") {
       msgs.push({ role: m.role, content: m.content });
@@ -608,10 +798,12 @@ async function llmTurn(userText, state) {
 
   const assistantReply = await openaiChat(msgs, { jsonMode: false, maxTokens: 550 });
 
+  // Update history
   s._history.push({ role: "user", content: String(userText || "").trim() });
   s._history.push({ role: "assistant", content: String(assistantReply || "").trim() });
   s._history = clampHistory(s._history, 18);
 
+  // Extractor pass to update state + quick replies
   const extractorMsgs = [
     { role: "system", content: SDS_EXTRACTOR_PROMPT },
     { role: "system", content: `CURRENT_STATE: ${JSON.stringify(stateSnapshot)}` },
@@ -633,8 +825,10 @@ async function llmTurn(userText, state) {
 
   const quickReplies = Array.isArray(extracted?.quick_replies) ? extracted.quick_replies : [];
 
+  // Merge state update
   Object.assign(s, stateUpdate);
 
+  // Normalize again (safe)
   if (typeof s.email === "string") s.email = s.email.toLowerCase();
   if (typeof s.phone === "string") {
     const p = extractTenDigit(s.phone);
@@ -659,6 +853,7 @@ async function handleCorePOST(req, res) {
       try { state = JSON.parse(state); } catch { state = {}; }
     }
 
+    // hydrate from state_json if needed
     if (
       (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
       typeof body.state_json === "string" &&
@@ -686,6 +881,7 @@ async function handleCorePOST(req, res) {
       return originalJson(out);
     };
 
+    // INIT: let prompt do greeting (text-first)
     if (body.init || (!user && !state._started)) {
       state._started = true;
       const initTurn = await llmTurn("hello", state);
@@ -707,9 +903,13 @@ async function handleCorePOST(req, res) {
       });
     }
 
+    // Main turn
     const result = await llmTurn(user, state);
     const nextState = result.state || state;
 
+    // Zapier automation:
+    // - Session Zap once we have name + phone (and haven't sent)
+    // - Booking Zap once booking_complete true (and haven't sent)
     const bookingComplete = !!nextState.booking_complete;
 
     if (nextState.name && nextState.phone && !nextState._sessionSent) {
@@ -749,6 +949,7 @@ async function handleCorePOST(req, res) {
 
 /* ========================= MAIN EXPORT ========================= */
 module.exports = async (req, res) => {
+  // Meta verify (GET)
   if (req.method === "GET") {
     const mode = req.query?.["hub.mode"];
     const token = req.query?.["hub.verify_token"];
@@ -764,6 +965,7 @@ module.exports = async (req, res) => {
 
   const body = req.body || {};
 
+  // Direct Meta webhook branch
   if (body && body.object === "page" && Array.isArray(body.entry)) {
     if (!verifyFBSignature(req)) return res.sendStatus(403);
 
@@ -816,5 +1018,6 @@ module.exports = async (req, res) => {
     return res.status(200).send("EVENT_RECEIVED");
   }
 
+  // ManyChat + Web branch
   return handleCorePOST(req, res);
 };
