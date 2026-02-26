@@ -28,10 +28,19 @@ const { URL } = require("url");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || "";
 const OPENAI_API_BASE = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
-const OPENAI_TIMEOUT_MS = Math.max(1200, parseInt(process.env.OPENAI_TIMEOUT_MS || "12000", 10) || 12000);
+const OPENAI_TIMEOUT_MS = Math.max(
+  1200,
+  parseInt(process.env.OPENAI_TIMEOUT_MS || "12000", 10) || 12000
+);
 
-const SESSION_TTL_MIN = Math.max(10, parseInt(process.env.SESSION_TTL_MIN || "240", 10) || 240);
-const MAX_HISTORY_MESSAGES = Math.max(6, parseInt(process.env.MAX_HISTORY_MESSAGES || "18", 10) || 18); // total msgs (user+assistant)
+const SESSION_TTL_MIN = Math.max(
+  10,
+  parseInt(process.env.SESSION_TTL_MIN || "240", 10) || 240
+);
+const MAX_HISTORY_MESSAGES = Math.max(
+  6,
+  parseInt(process.env.MAX_HISTORY_MESSAGES || "18", 10) || 18
+); // total msgs (user+assistant)
 
 /* ========================= Meta Messenger Direct Support ========================= */
 const FB_PAGE_ACCESS_TOKEN =
@@ -40,15 +49,16 @@ const FB_PAGE_ACCESS_TOKEN =
 const FB_VERIFY_TOKEN =
   process.env.VERIFY_TOKEN || process.env.FB_VERIFY_TOKEN || "switchboard_verify_123";
 
-const FB_APP_SECRET =
-  process.env.APP_SECRET || process.env.FB_APP_SECRET || "";
+const FB_APP_SECRET = process.env.APP_SECRET || process.env.FB_APP_SECRET || "";
 
 // Optional: Vercel KV persistence. If not installed, falls back to in-memory.
 let kv = null;
 try {
   const vercelKv = require("@vercel/kv");
   kv = vercelKv?.kv || vercelKv;
-} catch { kv = null; }
+} catch {
+  kv = null;
+}
 
 const __memState = new Map();
 
@@ -59,26 +69,40 @@ async function getStateByPSID(psid) {
       const raw = await kv.get(key);
       if (!raw) return null;
       if (typeof raw === "string") {
-        try { return JSON.parse(raw); } catch { return null; }
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
       }
       return raw;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
   return __memState.get(key) || null;
 }
 
 async function setStateByPSID(psid, stateObj) {
   const key = `sds:psid:${psid}`;
-  const safe = (stateObj && typeof stateObj === "object" && !Array.isArray(stateObj)) ? stateObj : {};
+  const safe =
+    stateObj && typeof stateObj === "object" && !Array.isArray(stateObj) ? stateObj : {};
   if (kv && typeof kv.set === "function") {
-    try { await kv.set(key, JSON.stringify(safe)); } catch { /* ignore */ }
+    try {
+      await kv.set(key, JSON.stringify(safe));
+    } catch {
+      /* ignore */
+    }
     return;
   }
   __memState.set(key, safe);
 }
 
 /* ========================= Low-level HTTP (fetch-safe) ========================= */
-function httpRequest(urlStr, { method = "GET", headers = {}, body = null, timeoutMs = 12000 } = {}) {
+function httpRequest(
+  urlStr,
+  { method = "GET", headers = {}, body = null, timeoutMs = 12000 } = {}
+) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const isHttps = u.protocol === "https:";
@@ -89,7 +113,7 @@ function httpRequest(urlStr, { method = "GET", headers = {}, body = null, timeou
       hostname: u.hostname,
       port: u.port || (isHttps ? 443 : 80),
       path: u.pathname + (u.search || ""),
-      headers: headers || {}
+      headers: headers || {},
     };
 
     const req = lib.request(opts, (res) => {
@@ -104,7 +128,11 @@ function httpRequest(urlStr, { method = "GET", headers = {}, body = null, timeou
 
     req.on("error", reject);
     req.setTimeout(timeoutMs, () => {
-      try { req.destroy(new Error("Request timeout")); } catch { /* ignore */ }
+      try {
+        req.destroy(new Error("Request timeout"));
+      } catch {
+        /* ignore */
+      }
     });
 
     if (body != null) req.write(body);
@@ -117,11 +145,15 @@ async function postJson(url, payload, extraHeaders = {}, timeoutMs = 12000) {
   const headers = {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(body),
-    ...extraHeaders
+    ...extraHeaders,
   };
   const res = await httpRequest(url, { method: "POST", headers, body, timeoutMs });
   let json = null;
-  try { json = JSON.parse(res.text || ""); } catch { json = null; }
+  try {
+    json = JSON.parse(res.text || "");
+  } catch {
+    json = null;
+  }
   return { ...res, json };
 }
 
@@ -129,7 +161,7 @@ async function postForm(url, formEncoded, extraHeaders = {}, timeoutMs = 12000) 
   const headers = {
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
     "Content-Length": Buffer.byteLength(formEncoded),
-    ...extraHeaders
+    ...extraHeaders,
   };
   return httpRequest(url, { method: "POST", headers, body: formEncoded, timeoutMs });
 }
@@ -137,17 +169,11 @@ async function postForm(url, formEncoded, extraHeaders = {}, timeoutMs = 12000) 
 /* ========================= Utilities ========================= */
 function encodeForm(data) {
   return Object.keys(data || {})
-    .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? ""))
+    .map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(data[k] ?? ""))
     .join("&");
 }
 
 const normalizeDigits = (s = "") => String(s || "").replace(/\D+/g, "");
-function formatPhone(digits) {
-  const d = normalizeDigits(digits);
-  return (d && d.length === 10)
-    ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`
-    : (digits || "");
-}
 
 function extractTenDigit(text = "") {
   const d = normalizeDigits(text);
@@ -164,6 +190,19 @@ function extractEmail(text = "") {
 function normalizeZip(input = "") {
   const m = String(input || "").match(/\b(\d{5})(?:-\d{4})?\b/);
   return m ? m[1] : "";
+}
+
+function safeTrim(v) {
+  if (typeof v !== "string") return "";
+  return v.trim();
+}
+
+function pickFirstNonEmpty(...vals) {
+  for (const v of vals) {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s) return s;
+  }
+  return "";
 }
 
 /* ========================= Robust input extraction ========================= */
@@ -198,9 +237,16 @@ function extractUserText(body = {}) {
   }
 
   const deny = new Set([
-    "state", "state_json", "channel", "source", "init",
-    "verify_token", "hub.mode", "hub.challenge",
-    "object", "entry"
+    "state",
+    "state_json",
+    "channel",
+    "source",
+    "init",
+    "verify_token",
+    "hub.mode",
+    "hub.challenge",
+    "object",
+    "entry",
   ]);
   for (const [k, v] of Object.entries(body || {})) {
     if (deny.has(k)) continue;
@@ -218,13 +264,12 @@ function enforceSessionTTL(state) {
 
   const lastSeen = typeof state._lastSeen === "number" ? state._lastSeen : 0;
   if (lastSeen && now - lastSeen > ttlMs) {
-    // Keep only minimal continuity; reset conversation but keep any Zapier flags to avoid re-sends
     return {
       _lastSeen: now,
       _started: false,
       _history: [],
       _sessionSent: !!state._sessionSent,
-      _bookingSent: !!state._bookingSent
+      _bookingSent: !!state._bookingSent,
     };
   }
   state._lastSeen = now;
@@ -244,7 +289,7 @@ function toManyChatV2(payload) {
   let qrs = [];
   if (payload && Array.isArray(payload.quickReplies)) {
     qrs = payload.quickReplies
-      .map(q => {
+      .map((q) => {
         if (typeof q === "string") return { type: "text", title: q, payload: q.toLowerCase() };
         if (q && typeof q === "object") {
           const title = q.title || q.text || String(q.label || "");
@@ -256,13 +301,17 @@ function toManyChatV2(payload) {
       .filter(Boolean);
   }
 
-  const messages = texts.map(t => ({ type: "text", text: t }));
+  const messages = texts.map((t) => ({ type: "text", text: t }));
   const out = { version: "v2", content: { messages } };
   if (qrs.length) out.content.quick_replies = qrs;
 
-  const st = (payload && payload.state !== undefined) ? payload.state : {};
+  const st = payload && payload.state !== undefined ? payload.state : {};
   out.state = st;
-  try { out.state_json = JSON.stringify(st); } catch { out.state_json = "{}"; }
+  try {
+    out.state_json = JSON.stringify(st);
+  } catch {
+    out.state_json = "{}";
+  }
   out.reply_text = messages[0]?.text || "";
   return out;
 }
@@ -289,97 +338,140 @@ async function sendSessionZapFormEncoded(payload) {
 }
 
 /**
- * ZAPIER FIX:
- * - Keep your existing keys (name2025/phone2025/email2025)
- * - Add ALL booking fields
- * - Add multiple aliases (old zaps / filters often rely on slightly different field names)
+ * SURGICAL: Normalize state fields so Zapier doesn't get blanks when the model
+ * returns different casing/aliases (Window vs window, OutdoorWater vs outdoorWater, etc.)
+ * This does NOT rename your Zapier keys — only ensures state has canonical fields populated.
+ */
+function normalizeStateForZapier(state = {}) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return state;
+
+  // Canonical: name, phone, email
+  state.name = pickFirstNonEmpty(state.name, state.Name, state.full_name, state.fullName);
+  state.phone = pickFirstNonEmpty(state.phone, state.Phone, state.phone2025, state.Phone2025);
+  state.email = pickFirstNonEmpty(state.email, state.Email, state.email2025, state.Email2025);
+
+  // Canonical: address, zip
+  state.address = pickFirstNonEmpty(state.address, state.Address, state.service_address, state.serviceAddress);
+  state.zip = pickFirstNonEmpty(state.zip, state.Zip, state.ZIP, state.postal_code, state.postalCode);
+
+  // Canonical: date, window
+  state.date = pickFirstNonEmpty(state.date, state.Date, state.cleaning_date, state.cleaningDate, state.service_date);
+  state.window = pickFirstNonEmpty(state.window, state.Window, state.arrival_window, state.arrivalWindow);
+
+  // Canonical: pets
+  state.pets = pickFirstNonEmpty(state.pets, state.Pets, state.pet, state.hasPets);
+
+  // Canonical: building (house/apartment)
+  state.building = pickFirstNonEmpty(
+    state.building,
+    state.BuildingType,
+    state.buildingType,
+    state.house_or_apartment,
+    state.houseOrApartment,
+    state.property_type,
+    state.propertyType
+  );
+
+  // Canonical: floor
+  state.floor = pickFirstNonEmpty(state.floor, state.Floor, state.apartment_floor, state.apartmentFloor);
+
+  // Canonical: outdoorWater
+  state.outdoorWater = pickFirstNonEmpty(
+    state.outdoorWater,
+    state.OutdoorWater,
+    state.outdoor_water,
+    state.water_supply,
+    state.waterSupply,
+    state.outside_water,
+    state.outsideWater
+  );
+
+  // Canonical: notes
+  state.notes = pickFirstNonEmpty(state.notes, state.Notes, state.note, state.technician_notes, state.technicianNotes);
+
+  // Canonical: pricing/breakdown/service
+  state.selected_service = pickFirstNonEmpty(
+    state.selected_service,
+    state.selectedService,
+    state["selected service"],
+    state.service,
+    state.Service
+  );
+
+  state.Cleaning_Breakdown = pickFirstNonEmpty(
+    state.Cleaning_Breakdown,
+    state.cleaning_breakdown,
+    state.breakdown,
+    state.Breakdown,
+    state.cleaningBreakdown
+  );
+
+  // total_price number handling
+  if (typeof state.total_price !== "number") {
+    if (typeof state.total === "number") state.total_price = state.total;
+    else if (typeof state.Total === "number") state.total_price = state.Total;
+    else if (typeof state.total_price === "string") {
+      const n = parseFloat(state.total_price.replace(/[^0-9.]/g, ""));
+      if (!Number.isNaN(n)) state.total_price = n;
+    }
+  }
+
+  // Normalize phone/email/zip formatting
+  if (typeof state.phone === "string") {
+    const digits = extractTenDigit(state.phone);
+    if (digits) state.phone = digits;
+  }
+  if (typeof state.email === "string") {
+    const em = extractEmail(state.email);
+    if (em) state.email = em;
+  }
+  if (typeof state.zip === "string") {
+    const z = normalizeZip(state.zip);
+    if (z) state.zip = z;
+  }
+
+  return state;
+}
+
+/**
+ * IMPORTANT: Keep Zapier field NAMES exactly the same as your existing Zap mappings.
+ * We only improve the source (state aliases) so fields stop arriving blank.
  */
 function buildZapPayloadFromState(state = {}) {
-  const total =
-    typeof state.total_price === "number" ? state.total_price :
-    (typeof state.total === "number" ? state.total : 0);
-
-  const selected =
-    state.selected_service || state.selectedService || state.service || state.Service || "";
-
-  const zip = state.zip || state.Zip || state.ZIP || "";
-  const address = state.address || state.Address || "";
-  const name = state.name || state.Name || "";
-  const phone = state.phone || state.Phone || "";
-  const email = state.email || state.Email || "";
-  const date = state.date || state.Date || "";
-  const window = state.window || state.Window || "";
-  const pets = state.pets || state.Pets || "";
-  const building = state.building || state.BuildingType || state.Building || "";
-  const floor = state.floor || state.Floor || "";
-  const outdoorWater = state.outdoorWater || state.OutdoorWater || state.outdoor_water || "";
-  const notes = state.notes || state.Notes || "";
-  const breakdown = state.Cleaning_Breakdown || state.cleaning_breakdown || state.breakdown || "";
-
-  const booking_complete = !!state.booking_complete;
+  const s = normalizeStateForZapier({ ...state });
 
   return {
-    // ---- keep existing “2025” keys used by your zaps ----
-    name2025: name,
-    phone2025: phone,
-    email2025: email,
+    Cleaning_Breakdown: s.Cleaning_Breakdown || "",
+    "selected service": s.selected_service || "",
+    "Total Price": typeof s.total_price === "number" ? s.total_price : 0,
 
-    // ---- core standard keys (common mapping) ----
-    Cleaning_Breakdown: breakdown,
-    selected_service: selected,
-    total_price: total,
-    zip,
-    address,
-    name,
-    phone,
-    email,
-    date,
-    window,
-    pets,
-    building,
-    floor,
-    outdoorWater,
-    notes,
-    booking_complete,
+    // These are the names your Zap already expects:
+    name2025: s.name || "",
+    phone2025: s.phone || "",
+    email2025: s.email || "",
 
-    // ---- legacy/alias keys (prevents “not parsing all info”) ----
-    "selected service": selected,
-    "Selected Service": selected,
-    Service: selected,
+    Address: s.address || "",
+    date: s.date || "",
+    Window: s.window || "",
+    pets: s.pets || "",
+    OutdoorWater: s.outdoorWater || "",
+    BuildingType: s.building || "",
+    Notes: s.notes || "",
 
-    "Total Price": total,
-    Total: total,
-    total: total,
-
-    ZIP: zip,
-    Zip: zip,
-
-    Address: address,
-
-    Window: window,
-    ArrivalWindow: window,
-
-    Pets: pets,
-    BuildingType: building,
-    FloorLevel: floor,
-    OutdoorWater: outdoorWater,
-    Notes: notes,
-
-    // ---- helpful metadata (won’t break anything) ----
-    created_at: new Date().toISOString()
+    booking_complete: !!s.booking_complete,
   };
 }
 
 /* ========================= Meta helpers ========================= */
 function toFBQuickReplies(quickReplies) {
   if (!Array.isArray(quickReplies) || !quickReplies.length) return undefined;
-  return quickReplies.slice(0, 13).map(q => {
-    const title = typeof q === "string" ? q : (q?.title || q?.text || "");
-    const payload = (typeof q === "string" ? q : (q?.payload || title || "")).toLowerCase();
+  return quickReplies.slice(0, 13).map((q) => {
+    const title = typeof q === "string" ? q : q?.title || q?.text || "";
+    const payload = (typeof q === "string" ? q : q?.payload || title || "").toLowerCase();
     return {
       content_type: "text",
       title: String(title).slice(0, 20),
-      payload: String(payload).slice(0, 1000)
+      payload: String(payload).slice(0, 1000),
     };
   });
 }
@@ -387,17 +479,24 @@ function toFBQuickReplies(quickReplies) {
 async function fbSendText(psid, text, quickReplies) {
   if (!FB_PAGE_ACCESS_TOKEN) return;
 
-  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(FB_PAGE_ACCESS_TOKEN)}`;
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(
+    FB_PAGE_ACCESS_TOKEN
+  )}`;
   const msgObj = { text: String(text || "").trim() || " " };
   const qr = toFBQuickReplies(quickReplies);
   if (qr) msgObj.quick_replies = qr;
 
   try {
-    await postJson(url, {
-      messaging_type: "RESPONSE",
-      recipient: { id: psid },
-      message: msgObj
-    }, {}, 12000);
+    await postJson(
+      url,
+      {
+        messaging_type: "RESPONSE",
+        recipient: { id: psid },
+        message: msgObj,
+      },
+      {},
+      12000
+    );
   } catch (e) {
     console.error("fbSendText failed", e);
   }
@@ -406,15 +505,13 @@ async function fbSendText(psid, text, quickReplies) {
 function verifyFBSignature(req) {
   if (!FB_APP_SECRET) return true;
 
-  const sig =
-    req.headers?.["x-hub-signature-256"] ||
-    req.headers?.["X-Hub-Signature-256"];
-
+  const sig = req.headers?.["x-hub-signature-256"] || req.headers?.["X-Hub-Signature-256"];
   if (!sig || typeof sig !== "string") return true;
 
   try {
     const body = JSON.stringify(req.body || {});
-    const expected = "sha256=" + crypto.createHmac("sha256", FB_APP_SECRET).update(body).digest("hex");
+    const expected =
+      "sha256=" + crypto.createHmac("sha256", FB_APP_SECRET).update(body).digest("hex");
     return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
   } catch {
     return true;
@@ -471,19 +568,6 @@ If user input is "__INIT__", greet and ask:
 "What do you need cleaned today: carpet, upholstery, or air ducts?"
 Provide quick replies:
 ["Carpet Cleaning","Upholstery Cleaning","Air Duct Cleaning"]
-
-SERVICE SELECTION (LOCKED - STOPS GREETING LOOP):
-If the user says any of these (case-insensitive), treat it as a valid selection and proceed WITHOUT re-asking the greeting:
-- "carpet", "carpet cleaning"
-- "upholstery", "upholstery cleaning"
-- "air ducts", "ducts", "duct cleaning", "air duct cleaning"
-When selected:
-- set state.selected_service to exactly one of:
-  "carpet" OR "upholstery" OR "duct"
-Then continue the correct flow:
-- carpet => ask areas needed (rooms/rugs/hallway/stairs)
-- upholstery => ask what pieces need cleaned
-- duct => ask: "How many HVAC systems (AC units) do you have?"
 
 ARRIVAL WINDOWS (LOCKED):
 Offer ONLY these two windows:
@@ -606,12 +690,12 @@ After ZIP verified in-area, collect in order (one question per message):
 7 Pets
 8 House or apartment
 9 Floor (if apartment)
-10 Outdoor water supply (a water spicket that you can connect a garden hose to)
+10 Outdoor water supply (that you can connect a garden hose to)
 11 Notes
 
 OUTDOOR WATER QUESTION (LOCKED TEXT):
 When you ask about outdoor water, ask exactly:
-"Do you have an outside water supply available? (a water spicket that you can connect a garden hose to)"
+"Do you have an outside water supply available? (that you can connect a garden hose to)"
 
 FINAL CONFIRMATION:
 Provide summary including Total: $___ then ask:
@@ -636,13 +720,21 @@ function safeJsonExtract(text = "") {
   const s = String(text || "").trim();
   if (!s) return null;
 
-  try { return JSON.parse(s); } catch { /* continue */ }
+  try {
+    return JSON.parse(s);
+  } catch {
+    /* continue */
+  }
 
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first >= 0 && last > first) {
     const slice = s.slice(first, last + 1);
-    try { return JSON.parse(slice); } catch { /* ignore */ }
+    try {
+      return JSON.parse(slice);
+    } catch {
+      /* ignore */
+    }
   }
   return null;
 }
@@ -668,51 +760,53 @@ function appendHistory(state, role, content) {
 
 /* ========================= OpenAI Call ========================= */
 async function callOpenAI(userText, currentState) {
-  const stateSafe = (currentState && typeof currentState === "object" && !Array.isArray(currentState)) ? currentState : {};
+  const stateSafe =
+    currentState && typeof currentState === "object" && !Array.isArray(currentState)
+      ? currentState
+      : {};
 
   if (!OPENAI_API_KEY) {
     return {
       reply: "Missing OpenAI API key on the server.",
       quick_replies: [],
-      state: stateSafe
+      state: stateSafe,
     };
   }
 
   ensureHistory(stateSafe);
 
   const stateJson = (() => {
-    try { return JSON.stringify(stateSafe || {}); } catch { return "{}"; }
+    try {
+      return JSON.stringify(stateSafe || {});
+    } catch {
+      return "{}";
+    }
   })();
 
   const messages = [
     { role: "system", content: SDS_SYSTEM_PROMPT },
     { role: "system", content: `CURRENT_STATE_JSON: ${stateJson}` },
     ...stateSafe._history,
-    { role: "user", content: String(userText || "").trim() }
+    { role: "user", content: String(userText || "").trim() },
   ];
 
   const payload = {
     model: OPENAI_MODEL,
     temperature: 0.25,
     max_tokens: 800,
-    messages
+    messages,
   };
 
   const url = `${OPENAI_API_BASE.replace(/\/+$/, "")}/chat/completions`;
 
-  const resp = await postJson(
-    url,
-    payload,
-    { "Authorization": `Bearer ${OPENAI_API_KEY}` },
-    OPENAI_TIMEOUT_MS
-  );
+  const resp = await postJson(url, payload, { Authorization: `Bearer ${OPENAI_API_KEY}` }, OPENAI_TIMEOUT_MS);
 
   if (!(resp.status >= 200 && resp.status < 300)) {
     console.error("OPENAI_NON_200", resp.status, (resp.text || "").slice(0, 300));
     return {
       reply: "Sorry — I had a connection issue. Please try again.",
       quick_replies: [],
-      state: stateSafe
+      state: stateSafe,
     };
   }
 
@@ -724,18 +818,24 @@ async function callOpenAI(userText, currentState) {
     return {
       reply: "Sorry — I had a quick formatting issue. Please try that again.",
       quick_replies: [],
-      state: stateSafe
+      state: stateSafe,
     };
   }
 
-  const reply = typeof parsed.reply === "string" ? parsed.reply : (typeof parsed.text === "string" ? parsed.text : "");
-  const quick = Array.isArray(parsed.quick_replies) ? parsed.quick_replies : (Array.isArray(parsed.quickReplies) ? parsed.quickReplies : []);
-  const nextState = (parsed.state && typeof parsed.state === "object" && !Array.isArray(parsed.state)) ? parsed.state : {};
+  const reply =
+    typeof parsed.reply === "string" ? parsed.reply : typeof parsed.text === "string" ? parsed.text : "";
+  const quick = Array.isArray(parsed.quick_replies)
+    ? parsed.quick_replies
+    : Array.isArray(parsed.quickReplies)
+    ? parsed.quickReplies
+    : [];
+  const nextState =
+    parsed.state && typeof parsed.state === "object" && !Array.isArray(parsed.state) ? parsed.state : {};
 
   return {
     reply: String(reply || "").trim() || "How can I help?",
     quick_replies: quick,
-    state: nextState
+    state: nextState,
   };
 }
 
@@ -747,27 +847,37 @@ async function handleCorePOST(req, res) {
 
     let state = body.state ?? {};
     if (typeof state === "string") {
-      try { state = JSON.parse(state); } catch { state = {}; }
+      try {
+        state = JSON.parse(state);
+      } catch {
+        state = {};
+      }
     }
 
+    // hydrate from state_json if needed
     if (
       (!state || typeof state !== "object" || Array.isArray(state) || !Object.keys(state).length) &&
       typeof body.state_json === "string" &&
       body.state_json.trim()
     ) {
-      try { state = JSON.parse(body.state_json) || {}; } catch { state = {}; }
+      try {
+        state = JSON.parse(body.state_json) || {};
+      } catch {
+        state = {};
+      }
     }
 
     if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
     state = enforceSessionTTL(state);
     ensureHistory(state);
 
-    const fromManyChat = (body.channel === "messenger") || (body.source === "manychat");
+    const fromManyChat = body.channel === "messenger" || body.source === "manychat";
     const originalJson = typeof res.json === "function" ? res.json.bind(res) : null;
 
+    // Response writer compatible with ManyChat + Web widget
     if (originalJson) {
       res.json = (data) => {
-        let out = (data == null) ? {} : (typeof data === "string" ? { reply: data } : { ...data });
+        let out = data == null ? {} : typeof data === "string" ? { reply: data } : { ...data };
         if (out.state === undefined) out.state = state;
 
         const v2 = toManyChatV2(out);
@@ -782,30 +892,39 @@ async function handleCorePOST(req, res) {
     // INIT / first-load handling — prompt drives greeting
     if (body.init || (!user && !state._started)) {
       const initCall = await callOpenAI("__INIT__", { ...state, _started: true });
-      const merged = (initCall.state && typeof initCall.state === "object") ? { ...state, ...initCall.state } : state;
+      const merged =
+        initCall.state && typeof initCall.state === "object" ? { ...state, ...initCall.state } : state;
       merged._started = true;
 
+      // Save assistant output into history (so Vercel follows OpenAI prompt behavior)
       appendHistory(merged, "user", "__INIT__");
       appendHistory(merged, "assistant", initCall.reply);
+
+      // Normalize (safe) so state stays consistent from the beginning
+      normalizeStateForZapier(merged);
 
       return res.status(200).json({
         reply: initCall.reply,
         quickReplies: initCall.quick_replies,
-        state: merged
+        state: merged,
       });
     }
 
     if (!user) {
+      // Empty message: just reprompt safely
       const emptyCall = await callOpenAI("Hi", state);
-      const merged = (emptyCall.state && typeof emptyCall.state === "object") ? { ...state, ...emptyCall.state } : state;
+      const merged =
+        emptyCall.state && typeof emptyCall.state === "object" ? { ...state, ...emptyCall.state } : state;
 
       appendHistory(merged, "user", "Hi");
       appendHistory(merged, "assistant", emptyCall.reply);
 
+      normalizeStateForZapier(merged);
+
       return res.status(200).json({
         reply: emptyCall.reply,
         quickReplies: emptyCall.quick_replies,
-        state: merged
+        state: merged,
       });
     }
 
@@ -815,33 +934,24 @@ async function handleCorePOST(req, res) {
     // Main: OpenAI drives everything
     const result = await callOpenAI(user, state);
 
-    const nextState = (result.state && typeof result.state === "object" && !Array.isArray(result.state))
-      ? { ...state, ...result.state }
-      : state;
+    const nextState =
+      result.state && typeof result.state === "object" && !Array.isArray(result.state)
+        ? { ...state, ...result.state }
+        : state;
 
-    // Normalize common fields if model returns variants
-    if (typeof nextState.phone === "string") {
-      const digits = extractTenDigit(nextState.phone);
-      if (digits) nextState.phone = digits;
-    }
-    if (typeof nextState.zip === "string") {
-      const z = normalizeZip(nextState.zip);
-      if (z) nextState.zip = z;
-    }
-    if (typeof nextState.email === "string") {
-      const em = extractEmail(nextState.email);
-      if (em) nextState.email = em;
-    }
+    // Normalize state BEFORE history + Zapier sends (this is the Zapier blank-field fix)
+    normalizeStateForZapier(nextState);
 
-    // Append to history (parity with Prompt Editor)
+    // Append to history (THIS is what makes Vercel match Prompt Editor behavior)
     appendHistory(nextState, "user", user);
     appendHistory(nextState, "assistant", result.reply);
 
     // Zapier automation:
     // - Session Zap once we have name + phone (and haven't sent)
     // - Booking Zap once booking_complete true (and haven't sent)
-    const bookingComplete = !!(nextState.booking_complete);
+    const bookingComplete = !!nextState.booking_complete;
 
+    // Optional: if booking just became complete and model forgot to set upsell flag, keep it false.
     if (!wasBookingComplete && bookingComplete && typeof nextState.post_booking_upsell_done !== "boolean") {
       nextState.post_booking_upsell_done = false;
     }
@@ -869,14 +979,15 @@ async function handleCorePOST(req, res) {
     return res.status(200).json({
       reply: result.reply,
       quickReplies: result.quick_replies,
-      state: nextState
+      state: nextState,
     });
   } catch (err) {
     console.error("chat.js error", err);
     return res.status(200).json({
-      reply: "Sorry — something glitched on my end, but I’m still here. Tell me what you need cleaned: carpet, upholstery, or air ducts.",
+      reply:
+        "Sorry — something glitched on my end, but I’m still here. Tell me what you need cleaned: carpet, upholstery, or air ducts.",
       state: { _started: true, _lastSeen: Date.now(), _history: [] },
-      error: String((err && err.message) || err)
+      error: String((err && err.message) || err),
     });
   }
 }
@@ -923,25 +1034,44 @@ module.exports = async (req, res) => {
           query: {},
           body: incoming.init
             ? { init: true, state: storedState, source: "meta" }
-            : { text: incoming.text, state: storedState, source: "meta" }
+            : { text: incoming.text, state: storedState, source: "meta" },
         };
 
         const fakeRes = {
           _status: 200,
-          status(code) { this._status = code; return this; },
-          json(obj) { captured = obj; return obj; },
-          send(str) { captured = { reply: String(str || ""), state: storedState }; return captured; },
-          sendStatus(code) { this._status = code; captured = null; return null; }
+          status(code) {
+            this._status = code;
+            return this;
+          },
+          json(obj) {
+            captured = obj;
+            return obj;
+          },
+          send(str) {
+            captured = { reply: String(str || ""), state: storedState };
+            return captured;
+          },
+          sendStatus(code) {
+            this._status = code;
+            captured = null;
+            return null;
+          },
         };
 
         await handleCorePOST(fakeReq, fakeRes);
 
-        const nextState = (captured && captured.state && typeof captured.state === "object") ? captured.state : storedState;
+        const nextState =
+          captured && captured.state && typeof captured.state === "object" ? captured.state : storedState;
+
+        // Normalize before saving too (keeps PSID state clean)
+        normalizeStateForZapier(nextState);
+
         await setStateByPSID(psid, nextState);
 
-        const replyText = (captured && (captured.reply_text || captured.reply))
-          ? String(captured.reply_text || captured.reply)
-          : "";
+        const replyText =
+          captured && (captured.reply_text || captured.reply)
+            ? String(captured.reply_text || captured.reply)
+            : "";
 
         const quickReplies = captured?.quickReplies;
         await fbSendText(psid, replyText || "How can we help?", quickReplies);
