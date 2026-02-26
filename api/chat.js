@@ -387,7 +387,7 @@ function _deriveFromHistory(state = {}) {
   const zip = text.match(/\b\d{5}\b/);
   if (zip) out.zip = zip[0];
 
-  // NAME (FIX): safe extraction
+  // NAME (critical)
   const nameLine = text.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)+)\b/i);
   if (nameLine && looksLikeFullName(nameLine[1])) {
     out.name = nameLine[1].trim();
@@ -419,7 +419,7 @@ function _deriveFromHistory(state = {}) {
   if (/\bno\b.*\boutdoor\s+water\b/i.test(text) || /\boutdoor\s+water\b.*\bno\b/i.test(text)) out.outdoorWater = "No";
   if (/\boutdoor\s+water\b.*\b(yes|available|access)\b/i.test(text) || /\bwater\s+spig(?:ot|got)\b/i.test(text)) out.outdoorWater = "Yes";
 
-  // Address (best-effort; only used if state is blank)
+  // Address
   const addr =
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*\s+(?:[A-Za-z .'-]+)\s+(?:GA|Georgia)\s+\d{5}\b/i) ||
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*,\s*[A-Za-z .'-]+,\s*(?:GA|Georgia)\s+\d{5}\b/i);
@@ -513,73 +513,103 @@ function buildZapPayloadFromState(state = {}) {
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
 
-/* ========================= QUICK REPLIES (NEW): auto-infer if extractor doesn't provide ========================= */
+/* ========================= QUICK REPLIES (SANITIZER) =========================
+User requirements:
+1) Finalize => ONLY Yes / No
+2) Basic/Deep flow: no long sentence buttons; keep minimal (Basic/Deep) and add-ons => Yes/No
+3) Notes => ONLY ["No special notes","Yes, I have notes for the technician"]
+4) Name question => NO quick replies
+5) ZIP question => NO quick replies
+Also: Avoid ANY QR on typed capture fields (address/phone/email too) to prevent users tapping junk text.
+============================================================================= */
+
 const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
 const QR_WINDOWS = ["8 to 12", "1 to 5"];
-const QR_PETS = ["No pets", "Yes, pets"];
-const QR_BUILDING = ["House", "Apartment"];
-const QR_WATER = ["Yes, outdoor water available", "No outdoor water"];
-const QR_NOTES = ["No special notes", "I have notes"];
-const QR_FINALIZE = ["Finalize booking", "Make changes"];
-const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
-const QR_PROCEED = ["Proceed", "No"];
+const QR_YN = ["Yes", "No"];
+const QR_NOTES = ["No special notes", "Yes, I have notes for the technician"];
+const QR_BASIC_DEEP = ["Basic", "Deep"];
 
-function inferQuickReplies(replyText = "") {
-  const t = String(replyText || "").toLowerCase();
+function sanitizeQuickReplies(replyText = "", quickReplies = []) {
+  const t = String(replyText || "").trim();
+  const l = t.toLowerCase();
 
-  // service chooser
-  if (/(what do you need cleaned today|carpet,\s*upholstery,\s*or\s*air ducts|carpet\s+or\s+upholstery\s+or\s+air ducts)/i.test(replyText)) {
-    return QR_SERVICE.slice();
+  // 4) Name capture => NO quick replies
+  if (/\b(full name|your full name|your name|what(?:’|'|)s your name|name for the booking)\b/i.test(t)) {
+    return [];
   }
 
-  // arrival window
-  if (/(arrival window|which.*window|8 to 12|1 to 5)/i.test(replyText) && /8\s*to\s*12/i.test(replyText) && /1\s*to\s*5/i.test(replyText)) {
+  // 5) ZIP capture => NO quick replies
+  if (/\bzip\b/i.test(t) && /\bcode\b/i.test(t)) {
+    return [];
+  }
+  if (/please provide your zip/i.test(t) || /what(?:’|'|)s the zip/i.test(t)) {
+    return [];
+  }
+
+  // Also remove QR for other typed fields to prevent sending the question as input
+  if (/\b(address|street)\b/i.test(t) && /\?$/.test(t)) return [];
+  if (/\b(phone|phone number)\b/i.test(t) && /\?$/.test(t)) return [];
+  if (/\b(email|email address)\b/i.test(t) && /\?$/.test(t)) return [];
+
+  // Arrival window => exactly two options
+  if (/\b(arrival window|which arrival|which window)\b/i.test(t) && /8\s*to\s*12/i.test(t) && /1\s*to\s*5/i.test(t)) {
     return QR_WINDOWS.slice();
   }
 
-  // pets
-  if (/(any pets|pets we should know|do you have.*pets)/i.test(replyText)) {
-    return QR_PETS.slice();
+  // Outdoor water => Yes/No (not verbose)
+  if (/\b(outdoor water|outside water|outside water supply|water supply)\b/i.test(t) && /\?$/.test(t)) {
+    return QR_YN.slice();
   }
 
-  // building
-  if (/(house or apartment|is this a house|is it a house|apartment\?)/i.test(replyText)) {
-    return QR_BUILDING.slice();
+  // Pets => Yes/No
+  if (/\b(pets?)\b/i.test(t) && /\?$/.test(t) && /\bpet\b/i.test(l)) {
+    return QR_YN.slice();
   }
 
-  // outdoor water
-  if (/(outdoor water|outside water|outside water supply|water supply)/i.test(replyText)) {
-    return QR_WATER.slice();
+  // House/apartment => keep those two options (short)
+  if (/\bhouse or apartment\b/i.test(t) || /\bis this a house\b/i.test(t) || /\bis it a house\b/i.test(t)) {
+    return ["House", "Apartment"];
   }
 
-  // notes
-  if (/(special notes|special instructions|notes for|any notes|instructions for our team)/i.test(replyText)) {
+  // 3) Notes => exactly two options
+  if (/\b(notes|special instructions|anything else we should be aware|special notes)\b/i.test(t) && /\?$/.test(t)) {
     return QR_NOTES.slice();
   }
 
-  // finalize prompt
-  if (/(change before i finalize|before i finalize|finalize this\?)/i.test(replyText)) {
-    return QR_FINALIZE.slice();
+  // 1) Finalize => ONLY Yes/No
+  if (/\b(change before i finalize|before i finalize|finalize this)\b/i.test(t)) {
+    return QR_YN.slice();
   }
 
-  // duct upsell
-  if (/(add.*duct|duct cleaning|air duct)/i.test(replyText) && /(would you like|before you go|add as well)/i.test(replyText)) {
-    return QR_DUCT_UPSELL.slice();
+  // 2) Duct package choose => Basic/Deep (short labels only)
+  if (/\bwould you like basic or deep\b/i.test(t)) {
+    return QR_BASIC_DEEP.slice();
   }
 
-  // generic proceed
-  if (/\bproceed\??\b/i.test(replyText) || /\bwould you like to proceed\b/i.test(replyText)) {
-    return QR_PROCEED.slice();
+  // 2) Duct add-ons => Yes/No
+  if (/\b(add furnace|furnace cleaning)\b/i.test(t) && /\?$/.test(t)) {
+    return QR_YN.slice();
+  }
+  if (/\b(add dryer|dryer vent)\b/i.test(t) && /\?$/.test(t)) {
+    return QR_YN.slice();
   }
 
+  // Duct upsell after booking => Yes/No
+  if (/\bduct cleaning\b/i.test(t) && /\badd\b/i.test(t) && /\?$/.test(t)) {
+    return QR_YN.slice();
+  }
+
+  // Service chooser
+  if (/\bwhat do you need cleaned today\b/i.test(t) || /\bcarpet,\s*upholstery,\s*or\s*air ducts\b/i.test(t)) {
+    return QR_SERVICE.slice();
+  }
+
+  // If model returns something huge/verbose, we prefer NONE unless we matched a safe pattern above.
+  // (This is what prevents your “question text button” problem.)
   return [];
 }
 
-/* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) =========================
-   IMPORTANT:
-   - This is the customer-facing behavior prompt.
-   - Keep it TEXT-FIRST (no JSON requirements) so Vercel behaves like OpenAI prompt testing.
-*/
+/* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) ========================= */
 const SDS_MASTER_PROMPT_TEXT = `
 You are Agent 995 for Same Day Steamerz. You are a calm, confident booking and sales agent.
 Your job is to answer questions, give quotes, upsell correctly, and complete full bookings end-to-end.
@@ -883,7 +913,7 @@ async function llmTurn(userText, state) {
     ? extracted.state_update
     : {};
 
-  const quickReplies = Array.isArray(extracted?.quick_replies) ? extracted.quick_replies : [];
+  const modelQuickReplies = Array.isArray(extracted?.quick_replies) ? extracted.quick_replies : [];
 
   // Merge state update
   Object.assign(s, stateUpdate);
@@ -899,10 +929,10 @@ async function llmTurn(userText, state) {
     if (z) s.zip = z;
   }
 
-  // If extractor did not provide quick replies, infer from assistant text
-  const inferred = (quickReplies && quickReplies.length) ? quickReplies : inferQuickReplies(assistantReply);
+  // HARD RULE: sanitize quick replies (prevents name/zip buttons + prevents long sentence buttons)
+  const sanitized = sanitizeQuickReplies(assistantReply, modelQuickReplies);
 
-  return { reply: assistantReply || "How can I help?", quickReplies: inferred, state: s };
+  return { reply: assistantReply || "How can I help?", quickReplies: sanitized, state: s };
 }
 
 /* ========================= CORE POST HANDLER ========================= */
@@ -950,8 +980,8 @@ async function handleCorePOST(req, res) {
       const initTurn = await llmTurn("hello", state);
       state = initTurn.state || state;
 
-      // force service quick replies on init if none
-      const qrs = (initTurn.quickReplies && initTurn.quickReplies.length) ? initTurn.quickReplies : QR_SERVICE;
+      // Force service options on init (sanitizer will allow these)
+      const qrs = QR_SERVICE.slice();
 
       return res.status(200).json({
         reply: initTurn.reply,
@@ -999,8 +1029,7 @@ async function handleCorePOST(req, res) {
       }
     }
 
-    // ===================== POST-BOOKING DUCT UPSELL (NEW) =====================
-    // After a finalized booking confirmation, offer duct cleaning ONCE (only if ducts not already included).
+    // POST-BOOKING DUCT UPSELL (kept as-is from your working direction)
     let finalReply = result.reply;
     let finalQuickReplies = Array.isArray(result.quickReplies) ? result.quickReplies : [];
 
@@ -1016,16 +1045,12 @@ async function handleCorePOST(req, res) {
         String(finalReply || "").trim() +
         "\n\nBefore you go — would you like to add air duct cleaning as well?";
 
-      finalQuickReplies = QR_DUCT_UPSELL.slice();
-
+      finalQuickReplies = QR_YN.slice();
       nextState.post_booking_duct_upsell_done = true;
     }
-    // ========================================================================
 
-    // If still no quick replies, infer them
-    if (!finalQuickReplies || !finalQuickReplies.length) {
-      finalQuickReplies = inferQuickReplies(finalReply);
-    }
+    // Re-sanitize (this is what enforces your 1-5 rules above)
+    finalQuickReplies = sanitizeQuickReplies(finalReply, finalQuickReplies);
 
     return res.status(200).json({
       reply: finalReply,
