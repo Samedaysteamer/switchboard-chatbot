@@ -362,7 +362,6 @@ function _deriveFromHistory(state = {}) {
     if (!s) return false;
     if (s.length > 60) return false;
     if (/@|\d/.test(s)) return false;
-    // avoid common non-name replies
     if (/^(yes|no|house|apartment|basic|deep|proceed|finalize|carpet|upholstery|ducts?)$/i.test(s)) return false;
     const parts = s.split(/\s+/).filter(Boolean);
     if (parts.length < 2) return false;
@@ -389,12 +388,10 @@ function _deriveFromHistory(state = {}) {
   if (zip) out.zip = zip[0];
 
   // NAME (FIX): safe extraction
-  // 1) Look for "Name: First Last"
   const nameLine = text.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)+)\b/i);
   if (nameLine && looksLikeFullName(nameLine[1])) {
     out.name = nameLine[1].trim();
   } else {
-    // 2) Otherwise: user message immediately after assistant asked for name
     for (let i = 0; i < hist.length - 1; i++) {
       const a = hist[i];
       const u = hist[i + 1];
@@ -428,7 +425,7 @@ function _deriveFromHistory(state = {}) {
     text.match(/\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'-]*,\s*[A-Za-z .'-]+,\s*(?:GA|Georgia)\s+\d{5}\b/i);
   if (addr) out.address = addr[0].trim();
 
-  // Date (prefer lines that mention date)
+  // Date
   const dateLine = text.match(/(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i);
   if (dateLine) out.date = dateLine[1].trim();
   else {
@@ -440,11 +437,11 @@ function _deriveFromHistory(state = {}) {
   const notesLine = text.match(/\bnotes?\s*[:\-]\s*([^\n]{1,140})/i);
   if (notesLine) out.notes = notesLine[1].trim();
 
-  // Total price (grab last total-looking amount)
+  // Total price
   const totals = [...text.matchAll(/\b(?:total|new\s+combined\s+total)\s*[:\-]?\s*\$?\s*(\d{2,5})\b/ig)];
   if (totals.length) out.total_price = _toNumber(totals[totals.length - 1][1]);
 
-  // Services inference (only if missing)
+  // Services inference
   const hasCarpet = /\bcarpet\b/i.test(text);
   const hasUph = /\bupholstery\b|\bcouch\b|\bsofa\b|\bloveseat\b|\bsectional\b/i.test(text);
   const hasDuct = /\bduct\b|\bair\s+duct\b|\bfurnace\b|\bdryer\s+vent\b/i.test(text);
@@ -515,6 +512,68 @@ function buildZapPayloadFromState(state = {}) {
   };
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
+
+/* ========================= QUICK REPLIES (NEW): auto-infer if extractor doesn't provide ========================= */
+const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
+const QR_WINDOWS = ["8 to 12", "1 to 5"];
+const QR_PETS = ["No pets", "Yes, pets"];
+const QR_BUILDING = ["House", "Apartment"];
+const QR_WATER = ["Yes, outdoor water available", "No outdoor water"];
+const QR_NOTES = ["No special notes", "I have notes"];
+const QR_FINALIZE = ["Finalize booking", "Make changes"];
+const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
+const QR_PROCEED = ["Proceed", "No"];
+
+function inferQuickReplies(replyText = "") {
+  const t = String(replyText || "").toLowerCase();
+
+  // service chooser
+  if (/(what do you need cleaned today|carpet,\s*upholstery,\s*or\s*air ducts|carpet\s+or\s+upholstery\s+or\s+air ducts)/i.test(replyText)) {
+    return QR_SERVICE.slice();
+  }
+
+  // arrival window
+  if (/(arrival window|which.*window|8 to 12|1 to 5)/i.test(replyText) && /8\s*to\s*12/i.test(replyText) && /1\s*to\s*5/i.test(replyText)) {
+    return QR_WINDOWS.slice();
+  }
+
+  // pets
+  if (/(any pets|pets we should know|do you have.*pets)/i.test(replyText)) {
+    return QR_PETS.slice();
+  }
+
+  // building
+  if (/(house or apartment|is this a house|is it a house|apartment\?)/i.test(replyText)) {
+    return QR_BUILDING.slice();
+  }
+
+  // outdoor water
+  if (/(outdoor water|outside water|outside water supply|water supply)/i.test(replyText)) {
+    return QR_WATER.slice();
+  }
+
+  // notes
+  if (/(special notes|special instructions|notes for|any notes|instructions for our team)/i.test(replyText)) {
+    return QR_NOTES.slice();
+  }
+
+  // finalize prompt
+  if (/(change before i finalize|before i finalize|finalize this\?)/i.test(replyText)) {
+    return QR_FINALIZE.slice();
+  }
+
+  // duct upsell
+  if (/(add.*duct|duct cleaning|air duct)/i.test(replyText) && /(would you like|before you go|add as well)/i.test(replyText)) {
+    return QR_DUCT_UPSELL.slice();
+  }
+
+  // generic proceed
+  if (/\bproceed\??\b/i.test(replyText) || /\bwould you like to proceed\b/i.test(replyText)) {
+    return QR_PROCEED.slice();
+  }
+
+  return [];
+}
 
 /* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) =========================
    IMPORTANT:
@@ -685,6 +744,7 @@ Rules:
 - total_price: number (no $ sign)
 - selected_service: "Carpet" or "Upholstery" or "Air Duct" or combinations like "Carpet + Upholstery"
 - Cleaning_Breakdown: short text summary of services and counts for Zapier.
+- post_booking_duct_upsell_done: boolean (set true if an after-finalization duct upsell was already offered)
 - If you are unsure of a field, do not guess—leave it unchanged.
 `.trim();
 
@@ -839,7 +899,10 @@ async function llmTurn(userText, state) {
     if (z) s.zip = z;
   }
 
-  return { reply: assistantReply || "How can I help?", quickReplies, state: s };
+  // If extractor did not provide quick replies, infer from assistant text
+  const inferred = (quickReplies && quickReplies.length) ? quickReplies : inferQuickReplies(assistantReply);
+
+  return { reply: assistantReply || "How can I help?", quickReplies: inferred, state: s };
 }
 
 /* ========================= CORE POST HANDLER ========================= */
@@ -886,9 +949,13 @@ async function handleCorePOST(req, res) {
       state._started = true;
       const initTurn = await llmTurn("hello", state);
       state = initTurn.state || state;
+
+      // force service quick replies on init if none
+      const qrs = (initTurn.quickReplies && initTurn.quickReplies.length) ? initTurn.quickReplies : QR_SERVICE;
+
       return res.status(200).json({
         reply: initTurn.reply,
-        quickReplies: initTurn.quickReplies,
+        quickReplies: qrs,
         state
       });
     }
@@ -932,9 +999,37 @@ async function handleCorePOST(req, res) {
       }
     }
 
+    // ===================== POST-BOOKING DUCT UPSELL (NEW) =====================
+    // After a finalized booking confirmation, offer duct cleaning ONCE (only if ducts not already included).
+    let finalReply = result.reply;
+    let finalQuickReplies = Array.isArray(result.quickReplies) ? result.quickReplies : [];
+
+    const svc = String(nextState.selected_service || nextState.selectedService || nextState["selected service"] || "");
+    const bd = String(nextState.Cleaning_Breakdown || nextState.cleaning_breakdown || nextState.breakdown || "");
+    const ductAlready = /duct/i.test(svc) || /duct/i.test(bd);
+
+    const looksFinalized = /finaliz/i.test(finalReply || "") || /dispatcher/i.test(finalReply || "") || /678-929-8202/.test(finalReply || "");
+    const upsellDone = !!(nextState.post_booking_duct_upsell_done);
+
+    if (bookingComplete && looksFinalized && !ductAlready && !upsellDone) {
+      finalReply =
+        String(finalReply || "").trim() +
+        "\n\nBefore you go — would you like to add air duct cleaning as well?";
+
+      finalQuickReplies = QR_DUCT_UPSELL.slice();
+
+      nextState.post_booking_duct_upsell_done = true;
+    }
+    // ========================================================================
+
+    // If still no quick replies, infer them
+    if (!finalQuickReplies || !finalQuickReplies.length) {
+      finalQuickReplies = inferQuickReplies(finalReply);
+    }
+
     return res.status(200).json({
-      reply: result.reply,
-      quickReplies: result.quickReplies,
+      reply: finalReply,
+      quickReplies: finalQuickReplies,
       state: nextState
     });
   } catch (err) {
