@@ -963,7 +963,7 @@ If they say no, finalize and include:
 NON-SALES HARD STOP (LOCKED)
 If they mention reschedule/cancel/complaint/refund/past job:
 Say this is the sales line and they must contact dispatcher at 678-929-8202.
-Collect only name, phone, and a brief reason. End.
+Collect only name and phone, then say: “Thanks — someone will reach out to see if we can serve you outside our area.” End.
 `.trim();
 
 /* ========================= OPENAI: Extractor Prompt (JSON MODE) ========================= */
@@ -1102,6 +1102,12 @@ async function llmTurn(userText, state) {
       role: "system",
       content:
         "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Ask ONLY for date, arrival window, and notes. Do NOT ask about pets/house/outdoor water. In the final summary, show the full address (never 'same as previous').",
+    });
+  }
+  if (s._skip_repeat_fields && Array.isArray(s._skip_repeat_fields) && s._skip_repeat_fields.length) {
+    msgs.push({
+      role: "system",
+      content: `SKIP_FIELDS: ${JSON.stringify(s._skip_repeat_fields)}. Do NOT ask these again.`,
     });
   }
   if (s._second_work_order_active) {
@@ -1306,9 +1312,11 @@ async function handleCorePOST(req, res) {
         delete state.Window;
         delete state.arrival_window;
         delete state.arrivalWindow;
-        // keep pets/building/outdoorWater from previous booking
+        // keep pets/building/outdoorWater from previous booking; only re-ask notes
         delete state.notes;
         delete state.Notes;
+        // prevent re-asking these fields when same location is confirmed
+        state._skip_repeat_fields = ["pets", "building", "outdoorWater", "floor"];
         user =
           "Customer accepted air duct cleaning add-on. Start a NEW duct cleaning booking now. The location and contact info are the SAME as the previous booking.";
       } else if (isNo(user)) {
