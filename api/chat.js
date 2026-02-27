@@ -1,4 +1,4 @@
-// Same Day Steamerz — TRUE LLM-FIRST (OPENAI PROMPT DRIVES 100% TEXT)
+Remember to follow the rules. There's something that you're changing in the ChatGPT style that is causing it to fail. It won't even deploy. So you're not making minimum changes. The only thing you're supposed to be adding is some quick replies. This is a very small thing. I need you to go into executive briefing and get this done. // Same Day Steamerz — TRUE LLM-FIRST (OPENAI PROMPT DRIVES 100% TEXT)
 // - OpenAI generates the customer-facing reply (plain text) just like OpenAI Prompt tests.
 // - Code only: channel plumbing (ManyChat/Web/Meta), state persistence, ZIP gate check, Zapier sends.
 // - State is updated via a SECOND OpenAI "extractor" call (JSON mode) so the prompt stays natural.
