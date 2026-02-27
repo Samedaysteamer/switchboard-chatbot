@@ -579,6 +579,7 @@ const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
 
 const QR_DUCT_PKG = ["Basic", "Deep"];
 const QR_YES_NO = ["Yes", "No"];
+const QR_PROCEED = ["Yes", "No", "Change information or value"];
 const QR_FURNACE = ["Yes", "No"]; // keep minimal
 const QR_DRYER = ["Yes", "No"]; // keep minimal
 
@@ -588,14 +589,35 @@ const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
 function _pad2(n) {
   return String(n).padStart(2, "0");
 }
+function _getTZDateParts(timeZone) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = fmt.formatToParts(new Date());
+  const out = {};
+  for (const p of parts) {
+    if (p.type !== "literal") out[p.type] = p.value;
+  }
+  return {
+    year: Number(out.year),
+    month: Number(out.month),
+    day: Number(out.day),
+  };
+}
+
 function getNextDateQuickReplies(days = 6) {
-  // days=6 => today + next 5 days
+  // days=6 => today + next 5 days (anchored to Eastern time by default)
   const out = [];
-  const now = new Date();
+  const tz = process.env.DATE_TZ || "America/New_York";
+  const { year, month, day } = _getTZDateParts(tz);
+  const baseUtc = new Date(Date.UTC(year, month - 1, day));
   for (let i = 0; i < days; i++) {
-    const d = new Date(now);
-    d.setDate(now.getDate() + i);
-    out.push(`${_pad2(d.getMonth() + 1)}/${_pad2(d.getDate())}`);
+    const d = new Date(baseUtc);
+    d.setUTCDate(baseUtc.getUTCDate() + i);
+    out.push(`${_pad2(d.getUTCMonth() + 1)}/${_pad2(d.getUTCDate())}`);
   }
   return out;
 }
@@ -687,7 +709,7 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
 
   // GENERIC PROCEED
   if (/\bproceed\b/.test(low) && /\?$/.test(rt)) {
-    return QR_YES_NO.slice();
+    return QR_PROCEED.slice();
   }
 
   // Otherwise: sanitize existing qrs (remove long/question-like buttons)
