@@ -567,210 +567,145 @@ function buildZapPayloadFromState(state = {}) {
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
 
-/* ========================= QUICK REPLIES (FIX ONLY): policy + sanitize =========================
-Goals (LOCKED):
-- ZIP prompt: NO quick replies
-- NAME prompt: NO quick replies
-- FINALIZE prompt: only 2 options (yes/no style)
-- NOTES prompt: Yes/No
-- DUCT Basic/Deep prompt: short options only
-- Add-ons: Yes/No
-- Date prompt: quick replies = today + next 5 days (MM/DD) + "Other"
-- Upholstery piece prompt: examples
-- Seat/cushion count prompt: numeric options
-================================================================================= */
+/* ========================= QUICK REPLIES (FIX ONLY): deterministic + sanitize bad extractor buttons ========================= */
+const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
+const QR_WINDOWS = ["8 to 12", "1 to 5"];
+const QR_PETS = ["No pets", "Yes, pets"];
+const QR_BUILDING = ["House", "Apartment"];
+const QR_WATER = ["Yes", "No"];
+const QR_NOTES = ["No special notes", "I have notes"];
+const QR_FINAL_CONFIRM = ["No changes", "Make changes"]; // matches "anything you'd like to change?"
+const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
 
-const QR = Object.freeze({
-  SERVICE: ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"],
-  WINDOWS: ["8 to 12", "1 to 5"],
-  YESNO: ["Yes", "No"],
-  FINALIZE: ["Yes, finalize", "No, change"],
-  NOTES: ["No", "Yes"],
-  DUCT_PKG: ["Basic", "Deep"],
-  SYSTEMS: ["1", "2", "3", "4"],
-  FLOOR: ["1", "2", "3", "4"],
-  UPH_PIECES: ["Sofa", "Loveseat", "Sectional", "Recliner", "Ottoman", "Dining chairs", "Mattress"],
-  SEATS: ["2", "3", "4", "5", "6", "7"],
-  DUCT_UPSELL: ["Yes, add ducts", "No thanks"],
-  PROCEED: ["Yes", "No"],
-});
+const QR_DUCT_PKG = ["Basic", "Deep"];
+const QR_YES_NO = ["Yes", "No"];
+const QR_FURNACE = ["Yes", "No"]; // keep minimal
+const QR_DRYER = ["Yes", "No"]; // keep minimal
 
-function mmdd(d) {
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${mm}/${dd}`;
+const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "Dining chairs", "Mattress"];
+const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
+
+function _pad2(n) {
+  return String(n).padStart(2, "0");
 }
-
-function dateQuickReplies(daysAhead = 5) {
+function getNextDateQuickReplies(days = 6) {
+  // days=6 => today + next 5 days
   const out = [];
-  const base = new Date();
-  // start today
-  for (let i = 0; i <= daysAhead; i++) {
-    const d = new Date(base);
-    d.setDate(base.getDate() + i);
-    out.push(mmdd(d));
+  const now = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    out.push(`${_pad2(d.getMonth() + 1)}/${_pad2(d.getDate())}`);
   }
-  out.push("Other");
   return out;
 }
 
-// Returns:
-// - null => no forced policy match (caller may use provided)
-// - []   => forced NONE
-// - [...] => forced quick replies
-function quickReplyPolicy(replyText = "") {
-  const t = String(replyText || "").trim();
-  const tl = t.toLowerCase();
-
-  // HARD: no QRs on ZIP
-  if (
-    (/\bzip\b/.test(tl) || /\bzip\s*code\b/.test(tl) || /\bzipcode\b/.test(tl)) &&
-    (/\bcode\b/.test(tl) || /\byour\b/.test(tl) || /\bwhat\b/.test(tl) || /\bplease\b/.test(tl) || /\benter\b/.test(tl) || /\bprovide\b/.test(tl) || /\bshare\b/.test(tl))
-  )
-    return [];
-
-  // HARD: no QRs on name
-  if (
-    /\b(full\s+name|your\s+name|what(?:’|'|)s\s+your\s+name|may\s+i\s+have\s+your\s+name|can\s+i\s+get\s+your\s+name|name\s+for\s+the\s+booking)\b/.test(
-      tl
-    )
-  )
-    return [];
-
-  // address (typed)
-  if (/\baddress\b/.test(tl) && /(service|full|street|what'?s the address)/.test(tl)) return [];
-
-  // email (typed)
-  if (/\bemail\b/.test(tl) && /\baddress\b/.test(tl)) return [];
-
-  // date picker (quick replies)
-  if (
-    /\bcleaning\s+date\b/.test(tl) ||
-    /\bpreferred\s+(date|day)\b/.test(tl) ||
-    /\bwhat\s+(date|day)\b/.test(tl) ||
-    /\bwhich\s+(date|day)\b/.test(tl) ||
-    /\bwhat\s+(date|day)\s+works\b/.test(tl) ||
-    /\bwhen\s+would\s+you\s+like\b/.test(tl) ||
-    /\bschedule\b/.test(tl)
-  ) {
-    return dateQuickReplies(5);
+function _dedupeShort(qrs = []) {
+  const seen = new Set();
+  const out = [];
+  for (const q of Array.isArray(qrs) ? qrs : []) {
+    const s = String(q || "").trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
   }
-
-  // arrival windows
-  if (/\barrival\b/.test(tl) && /\bwindow\b/.test(tl) && /\b8\b/.test(tl) && /\b12\b/.test(tl) && /\b1\b/.test(tl) && /\b5\b/.test(tl)) {
-    return QR.WINDOWS.slice();
-  }
-
-  // pets
-  if (/\bpets?\b/.test(tl) && (/\bany\b/.test(tl) || /\bdo you have\b/.test(tl) || /\bhome\b/.test(tl))) {
-    return QR.YESNO.slice();
-  }
-
-  // building
-  if (/\bhouse\b/.test(tl) && /\bapartment\b/.test(tl)) {
-    return ["House", "Apartment"];
-  }
-
-  // floor
-  if (/\bfloor\b/.test(tl) && /\bapartment\b/.test(tl)) {
-    return QR.FLOOR.slice();
-  }
-
-  // outdoor water
-  if (/\boutdoor\b/.test(tl) && /\bwater\b/.test(tl)) {
-    return QR.YESNO.slice();
-  }
-  if (/\boutside\b/.test(tl) && /\bwater\b/.test(tl)) {
-    return QR.YESNO.slice();
-  }
-
-  // notes / instructions
-  if (
-    /\bnotes?\b/.test(tl) ||
-    /\binstructions?\b/.test(tl) ||
-    /\banything\s+special\b/.test(tl) ||
-    /\baware\s+of\b/.test(tl)
-  ) {
-    return QR.NOTES.slice(); // No / Yes
-  }
-
-  // final confirmation
-  if (/\bchange\b/.test(tl) && /\bfinaliz/.test(tl)) {
-    return QR.FINALIZE.slice(); // only 2
-  }
-
-  // service chooser
-  if (
-    /\bwhat do you need cleaned today\b/.test(tl) ||
-    (/\bcarpet\b/.test(tl) && /\bupholstery\b/.test(tl) && /\bair ducts?\b/.test(tl))
-  ) {
-    return QR.SERVICE.slice();
-  }
-
-  // upholstery pieces examples
-  if (/\bupholstery\b/.test(tl) && (/\bpieces?\b/.test(tl) || /\bwhat\b/.test(tl) || /\bcleaned\b/.test(tl))) {
-    return QR.UPH_PIECES.slice();
-  }
-
-  // seat/cushion count
-  if ((/\bseat\b/.test(tl) || /\bcushion\b/.test(tl) || /\bcomfortably\b/.test(tl)) && /\bhow many\b/.test(tl)) {
-    return QR.SEATS.slice();
-  }
-
-  // duct package selection (Basic/Deep only)
-  if (/\bbasic\b/.test(tl) && /\bdeep\b/.test(tl) && (/\bwould you like\b/.test(tl) || /\bwhich\b/.test(tl) || /\?/.test(tl))) {
-    return QR.DUCT_PKG.slice();
-  }
-
-  // hvac systems count
-  if (/\bhvac\b/.test(tl) && /\bsystems?\b/.test(tl) && /\bhow many\b/.test(tl)) {
-    return QR.SYSTEMS.slice();
-  }
-
-  // add-ons (furnace / dryer vent) => Yes/No only
-  const wantsYesNo =
-    /\bwould you like\b/.test(tl) ||
-    /\bdo you want\b/.test(tl) ||
-    /\bwant to\b/.test(tl) ||
-    /\binterested\b/.test(tl) ||
-    /\badd\b/.test(tl) ||
-    /\binclude\b/.test(tl) ||
-    /\badd-on\b/.test(tl) ||
-    /\badd on\b/.test(tl);
-  if (/\bfurnace\b/.test(tl) && (wantsYesNo || /\?/.test(tl))) return QR.YESNO.slice();
-  if (/\bdryer\b/.test(tl) && /\bvent\b/.test(tl) && (wantsYesNo || /\?/.test(tl))) return QR.YESNO.slice();
-
-  // proceed
-  if (/\bproceed\b/.test(tl) || /\bwould you like to proceed\b/.test(tl)) return QR.PROCEED.slice();
-
-  return null;
+  return out;
 }
 
-function sanitizeProvidedQuickReplies(qrs) {
-  const arr = Array.isArray(qrs)
-    ? qrs
-        .filter((x) => typeof x === "string")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-  if (!arr.length) return [];
+function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
+  const rt = String(replyText || "");
+  const low = rt.toLowerCase();
 
-  // if any are "sentence buttons", discard
-  const tooLong = arr.some((s) => s.length > 28);
-  const looksSentence = arr.some(
-    (s) => /\?$/.test(s) || /\bwould you like\b/i.test(s) || /\bplease\b/i.test(s)
-  );
-  if (tooLong || looksSentence) return [];
+  // HARD SUPPRESS (per your rules): NO quick replies for these fields
+  if (/\bzip\b/.test(low) && /zip code/.test(low)) return [];
+  if (/what(?:'|\u2019)s your zip|zip code for|provide your zip/.test(low)) return [];
+  if (/what(?:'|\u2019)s your full name|your full name|full name for the booking|what(?:'|\u2019)s your name|can i have your name/.test(low)) return [];
+  if (/what(?:'|\u2019)s the address|service address|full address|address for the cleaning/.test(low)) return [];
+  if (/phone number|best phone|reach you/.test(low)) return [];
+  if (/email address|your email/.test(low)) return [];
 
-  // cap
-  return arr.slice(0, 13);
-}
+  // DATE quick replies (today + next 5 days)
+  if (/what date would you like|what day would you like|schedule your cleaning|preferred day/.test(low)) {
+    return getNextDateQuickReplies(6);
+  }
 
-function pickQuickReplies(replyText, provided) {
-  const forced = quickReplyPolicy(replyText);
-  if (forced !== null) return forced; // may be [] (forced none) or [..]
-  const cleaned = sanitizeProvidedQuickReplies(provided);
-  return cleaned;
+  // ARRIVAL WINDOW
+  if ((/arrival window|which.*window/.test(low)) && /8 to 12/.test(low) && /1 to 5/.test(low)) {
+    return QR_WINDOWS.slice();
+  }
+
+  // PETS
+  if (/pets/.test(low) && (/any pets|do you have.*pets|pets in the home|pets we should know/.test(low))) {
+    return QR_PETS.slice();
+  }
+
+  // BUILDING
+  if (/house or apartment|is this a house|is it a house|apartment\?/.test(low)) {
+    return QR_BUILDING.slice();
+  }
+
+  // OUTDOOR WATER
+  if (/outdoor water|outside water|water supply/.test(low)) {
+    return QR_WATER.slice();
+  }
+
+  // NOTES
+  if (/special notes|special instructions|any notes|notes for the technician|instructions for our team/.test(low)) {
+    return QR_NOTES.slice();
+  }
+
+  // UPHOLSTERY PIECES
+  if ((/upholstery/.test(low) && /what .*pieces/.test(low)) || (/what upholstery/.test(low) && /cleaned/.test(low))) {
+    return QR_UPH_PIECES.slice();
+  }
+
+  // SEAT / CUSHION COUNT
+  if (/how many .*?(seats|cushions)/.test(low) || /comfortably seat/.test(low)) {
+    return QR_SEAT_COUNTS.slice();
+  }
+
+  // DUCT PACKAGE SELECTION
+  if (/would you like basic or deep/.test(low) || (/basic/.test(low) && /deep/.test(low) && /\?$/.test(rt) && /duct/.test(low))) {
+    return QR_DUCT_PKG.slice();
+  }
+
+  // DUCT ADD-ONS (keep minimal yes/no to avoid "question button")
+  if (/furnace cleaning/.test(low) && /\$/.test(rt) && /\?$/.test(rt)) return QR_FURNACE.slice();
+  if (/dryer vent/.test(low) && /\$/.test(rt) && /\?$/.test(rt)) return QR_DRYER.slice();
+
+  // FINAL CONFIRMATION ("anything you'd like to change ...?")
+  if (/change before i finalize|before i finalize|finalize this\?/.test(low)) {
+    return QR_FINAL_CONFIRM.slice();
+  }
+
+  // POST-BOOKING DUCT UPSELL
+  if (/before you go/.test(low) && /duct/.test(low)) {
+    return QR_DUCT_UPSELL.slice();
+  }
+
+  // GENERIC PROCEED
+  if (/\bproceed\b/.test(low) && /\?$/.test(rt)) {
+    return QR_YES_NO.slice();
+  }
+
+  // Otherwise: sanitize existing qrs (remove long/question-like buttons)
+  const cleaned = _dedupeShort(existing);
+
+  const filtered = cleaned.filter((q) => {
+    const s = String(q || "").trim();
+    if (!s) return false;
+    // remove exact echo of the prompt line
+    if (s.toLowerCase() === rt.trim().toLowerCase()) return false;
+    // remove long sentences / questions
+    if (s.length > 28) return false;
+    if (/\?$/.test(s)) return false;
+    if (s.split(/\s+/).length > 5) return false;
+    return true;
+  });
+
+  return filtered;
 }
 /* ========================= END QUICK REPLIES FIX ONLY ========================= */
 
@@ -1091,7 +1026,7 @@ async function llmTurn(userText, state) {
       ? extracted.state_update
       : {};
 
-  const providedQuickReplies = Array.isArray(extracted?.quick_replies) ? extracted.quick_replies : [];
+  const extractorQuickReplies = Array.isArray(extracted?.quick_replies) ? extracted.quick_replies : [];
 
   // Merge state update
   Object.assign(s, stateUpdate);
@@ -1107,10 +1042,10 @@ async function llmTurn(userText, state) {
     if (z) s.zip = z;
   }
 
-  // ✅ Quick replies FIX: forced policy (or none) + sanitized provided fallback
-  const finalQuickReplies = pickQuickReplies(assistantReply, providedQuickReplies);
+  // QUICK REPLIES (FIX ONLY): deterministic normalizer
+  const normalizedQrs = normalizeQuickRepliesForPrompt(assistantReply, extractorQuickReplies);
 
-  return { reply: assistantReply || "How can I help?", quickReplies: finalQuickReplies, state: s };
+  return { reply: assistantReply || "How can I help?", quickReplies: normalizedQrs, state: s };
 }
 
 /* ========================= CORE POST HANDLER ========================= */
@@ -1167,7 +1102,7 @@ async function handleCorePOST(req, res) {
       state = initTurn.state || state;
 
       // force service quick replies on init if policy yields none
-      const qrs = initTurn.quickReplies && initTurn.quickReplies.length ? initTurn.quickReplies : QR.SERVICE;
+      const qrs = initTurn.quickReplies && initTurn.quickReplies.length ? initTurn.quickReplies : QR_SERVICE;
 
       return res.status(200).json({
         reply: initTurn.reply,
@@ -1233,13 +1168,13 @@ async function handleCorePOST(req, res) {
     if (bookingComplete && looksFinalized && !ductAlready && !upsellDone) {
       finalReply =
         String(finalReply || "").trim() + "\n\nBefore you go — would you like to add air duct cleaning as well?";
-      finalQuickReplies = QR.DUCT_UPSELL.slice();
+      finalQuickReplies = QR_DUCT_UPSELL.slice();
       nextState.post_booking_duct_upsell_done = true;
     }
     // ========================================================================
 
-    // ✅ Quick replies FIX (final): apply policy/sanitize against the final reply
-    finalQuickReplies = pickQuickReplies(finalReply, finalQuickReplies);
+    // FINAL quick replies: normalize so duct/date/zip/name rules are enforced
+    finalQuickReplies = normalizeQuickRepliesForPrompt(finalReply, finalQuickReplies);
 
     return res.status(200).json({
       reply: finalReply,
