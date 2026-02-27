@@ -597,9 +597,9 @@ const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "
 const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
 const QR_CARPET_AREAS = [
   "2 rooms",
+  "3 rooms",
+  "2 rooms, hallway",
   "3 rooms, hallway, stairs",
-  "3 rooms, hallway, living room",
-  "3 rooms, hallway, living room, stairs",
 ];
 
 function _pad2(n) {
@@ -717,6 +717,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_SEAT_COUNTS.slice();
   }
 
+  // PROCEED (including bundle wording / move forward)
+  if ((/\bproceed\b/.test(low) || /move forward/.test(low) || /bundle/.test(low)) && /\?$/.test(rt)) {
+    return QR_PROCEED.slice();
+  }
+
   // CARPET AREAS / ROOMS
   if (
     /carpet/.test(low) &&
@@ -747,11 +752,6 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   // POST-BOOKING DUCT UPSELL
   if (/before you go/.test(low) && /duct/.test(low)) {
     return QR_DUCT_UPSELL.slice();
-  }
-
-  // GENERIC PROCEED
-  if (/\bproceed\b/.test(low) && /\?$/.test(rt)) {
-    return QR_PROCEED.slice();
   }
 
   // Otherwise: sanitize existing qrs (remove long/question-like buttons)
@@ -787,6 +787,7 @@ ABSOLUTE OUTPUT RULES (LOCKED)
 - NEVER write prices in words.
 - NEVER explain pricing math or how prices are calculated.
 - NEVER say “per seat” or “$50 per seat” in customer messages. For upholstery pricing, only give the total price.
+- NEVER say “move forward.” When asking to proceed (including bundles), ask: “Would you like to proceed with booking?”
 - NEVER mention internal rules like “per area”, “billable areas”, “free hallway”, etc.
 - Ask ONLY ONE question per message.
 - NEVER repeat a question if the customer already provided the needed info.
