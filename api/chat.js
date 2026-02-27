@@ -938,7 +938,7 @@ If duct + carpet booked: it’s two separate work orders with different technici
 
 ZIP GATE (LOCKED)
 Only ask ZIP after the customer agrees to proceed and any required pre-zip upsell is resolved.
-If ZIP is outside service area, collect only name + phone and stop.
+If ZIP is outside service area, collect only name + phone and then say: “Thanks — someone will reach out to see if we can serve you outside our area.” End.
 
 BOOKING QUESTION ORDER (LOCKED — one question per message)
 After in-area ZIP confirmed:
@@ -1178,6 +1178,12 @@ async function llmTurn(userText, state) {
     if (s._prev_contact.phone) s.phone = s._prev_contact.phone;
     if (s._prev_contact.email) s.email = s._prev_contact.email;
     if (s._prev_contact.address) s.address = s._prev_contact.address;
+    if (s._prev_site) {
+      if (s._prev_site.pets) s.pets = s._prev_site.pets;
+      if (s._prev_site.building) s.building = s._prev_site.building;
+      if (s._prev_site.outdoorWater) s.outdoorWater = s._prev_site.outdoorWater;
+      if (s._prev_site.floor) s.floor = s._prev_site.floor;
+    }
   } else if (s._second_work_order_active && s.name && !looksLikeFullName(s.name)) {
     // Prevent service names like "Deep" from becoming the customer name
     delete s.name;
@@ -1299,6 +1305,13 @@ async function handleCorePOST(req, res) {
           email: state.email || "",
           address: state.address || state.Address || state.service_address || "",
         };
+        state._prev_site = {
+          pets: state.pets || state.Pets || "",
+          building: state.building || state.BuildingType || state.buildingType || "",
+          outdoorWater:
+            state.outdoorWater || state.OutdoorWater || state.water || state.waterSupply || "",
+          floor: state.floor || state.Floor || state.apartmentFloor || "",
+        };
         state._reuse_prev_info = true;
         // New work order: reset service-specific fields so duct flow starts clean
         state.booking_complete = false;
@@ -1312,7 +1325,7 @@ async function handleCorePOST(req, res) {
         delete state.Window;
         delete state.arrival_window;
         delete state.arrivalWindow;
-        // keep pets/building/outdoorWater from previous booking; only re-ask notes
+        // keep pets/building/outdoorWater/floor from previous booking; only re-ask notes
         delete state.notes;
         delete state.Notes;
         // prevent re-asking these fields when same location is confirmed
