@@ -826,9 +826,10 @@ ABSOLUTE OUTPUT RULES (LOCKED)
 - ALL prices must be displayed in NUMBERS with $ (examples: $100, $150, $250, $500).
 - NEVER write prices in words.
 - NEVER explain pricing math or how prices are calculated.
-- NEVER say “per seat” or “$50 per seat” in customer messages. For upholstery pricing, only give the total price.
+- NEVER say “per seat,” “per cushion,” or “$50 per seat/cushion” in customer messages. For upholstery pricing, only give the total price.
 - NEVER say “move forward.” When asking to proceed (including bundles), ask: “Would you like to proceed with booking?”
 - NEVER mention internal rules like “per area”, “billable areas”, “free hallway”, etc.
+- In the FINAL SUMMARY you must always include the customer’s NAME and full ADDRESS (never “same as previous”).
 - Ask ONLY ONE question per message.
 - NEVER repeat a question if the customer already provided the needed info.
 - Keep responses short, confident, and booking-focused.
@@ -855,13 +856,15 @@ CARPET PRICING (LOCKED)
 
 UPHOLSTERY (LOCKED)
 Always ask what pieces they need cleaned first.
-If they say sofa/couch/loveseat/sectional: ask seat count:
-“How many people can it comfortably seat?”
-Treat sofa/couch/loveseat as seating pricing.
+If they say sofa/couch/loveseat/sectional: ask cushion count:
+“How many cushions does it have?”
+Treat sofa/couch/loveseat/sectional as cushion pricing.
 Pricing:
-- Seating total: $50 x seat count (internal only; do not say “per seat”)
-- If seat count 1–3: minimum $150
-- If seat count 4+ OR it’s a sectional: minimum $250
+- Cushion total: $50 x cushion count (internal only; do not say “per cushion”)
+- If cushion count 1–3: minimum $150
+- If cushion count 4: $200
+- If cushion count 5: $250
+- If cushion count 6+: $50 per cushion (internal only)
 Other items:
 - Dining chair: $25 each (if they say “chairs” clarify dining vs single chairs before pricing)
 - Recliner: $80
@@ -952,7 +955,7 @@ After in-area ZIP confirmed:
 11 Notes
 
 FINAL CONFIRMATION (LOCKED)
-Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Then ask:
+Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Never say “same as previous.” Then ask:
 “Is there anything you’d like to change before I finalize this?”
 If they say no, finalize and include:
 “If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
@@ -1098,7 +1101,7 @@ async function llmTurn(userText, state) {
     msgs.push({
       role: "system",
       content:
-        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Proceed to the next unanswered booking questions.",
+        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Ask ONLY for date, arrival window, and notes. Do NOT ask about pets/house/outdoor water. In the final summary, show the full address (never 'same as previous').",
     });
   }
   if (s._second_work_order_active) {
@@ -1303,15 +1306,7 @@ async function handleCorePOST(req, res) {
         delete state.Window;
         delete state.arrival_window;
         delete state.arrivalWindow;
-        delete state.pets;
-        delete state.Pets;
-        delete state.building;
-        delete state.BuildingType;
-        delete state.buildingType;
-        delete state.outdoorWater;
-        delete state.OutdoorWater;
-        delete state.water;
-        delete state.waterSupply;
+        // keep pets/building/outdoorWater from previous booking
         delete state.notes;
         delete state.Notes;
         user =
