@@ -234,6 +234,32 @@ function looksLikeFullName(value = "") {
   return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)+$/.test(s);
 }
 
+function _parseUserDate(text = "") {
+  const m = String(text || "").match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (!m) return null;
+  const mm = parseInt(m[1], 10);
+  const dd = parseInt(m[2], 10);
+  if (!mm || !dd || mm > 12 || dd > 31) return null;
+  let yy = m[3] ? parseInt(m[3], 10) : null;
+  if (yy != null && yy < 100) yy += 2000;
+  return { month: mm, day: dd, year: yy };
+}
+
+function _getTodayParts() {
+  const tz = process.env.DATE_TZ || "America/New_York";
+  return _getTZDateParts(tz);
+}
+
+function _isPastDate({ year, month, day }) {
+  const today = _getTodayParts();
+  const y = year ?? today.year;
+  if (y < today.year) return true;
+  if (y > today.year) return false;
+  if (month < today.month) return true;
+  if (month > today.month) return false;
+  return day < today.day;
+}
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -605,9 +631,6 @@ const QR_PROCEED = ["Yes", "No", "Change information or value"];
 const QR_UPSELL_OFFER = ["Yes", "No", "Change information or value"];
 const QR_FURNACE = ["Yes", "No"]; // keep minimal
 const QR_DRYER = ["Yes", "No"]; // keep minimal
-const QR_HVAC_SYSTEMS = ["1", "2", "3", "4", "5", "Other"];
-const QR_APT_FLOOR = ["1st floor", "2nd floor", "3rd floor", "Other"];
-const QR_POST_DUCT_UPSELL = ["Yes, add carpet/upholstery", "No thanks"];
 
 const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "Dining chairs", "Mattress"];
 const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
@@ -748,16 +771,6 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_CARPET_AREAS.slice();
   }
 
-  // HVAC SYSTEMS
-  if (/how many hvac systems/.test(low) || /ac units/.test(low)) {
-    return QR_HVAC_SYSTEMS.slice();
-  }
-
-  // APARTMENT FLOOR
-  if (/what floor is your apartment/.test(low) || /floor.*apartment/.test(low)) {
-    return QR_APT_FLOOR.slice();
-  }
-
   // DUCT PACKAGE SELECTION
   if (/would you like basic or deep/.test(low) || (/basic/.test(low) && /deep/.test(low) && /\?$/.test(rt) && /duct/.test(low))) {
     return QR_DUCT_PKG.slice();
@@ -779,11 +792,6 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   // POST-BOOKING DUCT UPSELL
   if (/before you go/.test(low) && /duct/.test(low)) {
     return QR_DUCT_UPSELL.slice();
-  }
-
-  // POST-BOOKING CARPET/UPHOLSTERY UPSELL (after duct)
-  if (/before you go/.test(low) && (/carpet/.test(low) || /upholstery/.test(low))) {
-    return QR_POST_DUCT_UPSELL.slice();
   }
 
   // Otherwise: sanitize existing qrs (remove long/question-like buttons)
@@ -944,7 +952,7 @@ After in-area ZIP confirmed:
 11 Notes
 
 FINAL CONFIRMATION (LOCKED)
-Provide a clean summary that includes: Service, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, and Total. Do NOT include the customer name in the summary. Then ask:
+Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Then ask:
 “Is there anything you’d like to change before I finalize this?”
 If they say no, finalize and include:
 “If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
@@ -1175,8 +1183,8 @@ async function llmTurn(userText, state) {
 /* ========================= CORE POST HANDLER ========================= */
 async function handleCorePOST(req, res) {
   try {
-    const body = req.body || {};
-    let user = extractUserText(body);
+  const body = req.body || {};
+  let user = extractUserText(body);
 
     let state = body.state ?? {};
     if (typeof state === "string") {
@@ -1235,15 +1243,25 @@ async function handleCorePOST(req, res) {
       });
     }
 
-    if (!user) {
-      const emptyTurn = await llmTurn("hello", state);
-      state = emptyTurn.state || state;
-      return res.status(200).json({
-        reply: emptyTurn.reply,
-        quickReplies: emptyTurn.quickReplies,
-        state,
-      });
-    }
+  if (!user) {
+    const emptyTurn = await llmTurn("hello", state);
+    state = emptyTurn.state || state;
+    return res.status(200).json({
+      reply: emptyTurn.reply,
+      quickReplies: emptyTurn.quickReplies,
+      state,
+    });
+  }
+
+  // Prevent booking dates in the past
+  const parsedDate = _parseUserDate(user);
+  if (parsedDate && _isPastDate(parsedDate)) {
+    return res.status(200).json({
+      reply: "That date has already passed. What date would you like to schedule?",
+      quickReplies: getNextDateQuickReplies(6),
+      state,
+    });
+  }
 
     // Post-booking upsell flow: if user accepted duct upsell, ask if everything is the same location
     if (state._post_booking_duct_upsell_pending && user) {
@@ -1387,18 +1405,6 @@ async function handleCorePOST(req, res) {
       finalQuickReplies = QR_DUCT_UPSELL.slice();
       nextState.post_booking_duct_upsell_done = true;
       nextState._post_booking_duct_upsell_pending = true;
-    }
-    // ========================================================================
-
-    // ===================== POST-BOOKING CARPET/UPHOLSTERY UPSELL (after duct) =====================
-    const hasCarpetOrUph = /carpet|upholstery/i.test(svc) || /carpet|upholstery/i.test(bd);
-    const postDuctUpsellDone = !!nextState.post_booking_carpet_upsell_done;
-    if (bookingComplete && looksFinalized && ductAlready && !hasCarpetOrUph && !postDuctUpsellDone) {
-      finalReply =
-        String(finalReply || "").trim() +
-        "\n\nBefore you go — would you like to add carpet or upholstery cleaning as well?";
-      finalQuickReplies = QR_POST_DUCT_UPSELL.slice();
-      nextState.post_booking_carpet_upsell_done = true;
     }
     // ========================================================================
 
