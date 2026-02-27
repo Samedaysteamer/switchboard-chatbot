@@ -651,6 +651,7 @@ const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning
 const QR_WINDOWS = ["8 to 12", "1 to 5"];
 const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
+const QR_FLOOR = ["1st floor", "2nd floor", "3rd floor", "4th+ floor"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
 const QR_FINAL_CONFIRM = ["No", "Yes", "Change information or value"]; // matches "anything you'd like to change?"
@@ -763,6 +764,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   // BUILDING
   if (/house or apartment|is this a house|is it a house|apartment\?/.test(low)) {
     return QR_BUILDING.slice();
+  }
+
+  // APARTMENT FLOOR
+  if (/what floor|which floor|apartment on/.test(low)) {
+    return QR_FLOOR.slice();
   }
 
   // OUTDOOR WATER
@@ -1316,7 +1322,7 @@ async function handleCorePOST(req, res) {
     if (floorNum && floorNum > 3) {
       return res.status(200).json({
         reply:
-          "Thanks for letting me know. Apartments above the 3rd floor require a quick review — someone will reach out to see if we can service it.",
+          "Thanks for letting me know. Apartments above the 3rd floor require a portable unit — someone will reach out to see if we can service it.",
         quickReplies: [],
         state,
       });
