@@ -212,6 +212,15 @@ function clampHistory(arr, maxLen = 18) {
   return a.slice(a.length - maxLen);
 }
 
+function isYes(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  return t === "yes" || t.startsWith("yes,") || t.startsWith("y ");
+}
+function isNo(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  return t === "no" || t.startsWith("no,") || t.startsWith("n ");
+}
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -573,13 +582,14 @@ const QR_WINDOWS = ["8 to 12", "1 to 5"];
 const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
 const QR_WATER = ["Yes", "No"];
-const QR_NOTES = ["No special notes", "I have notes"];
+const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
 const QR_FINAL_CONFIRM = ["No changes", "Make changes"]; // matches "anything you'd like to change?"
 const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
 
 const QR_DUCT_PKG = ["Basic", "Deep"];
 const QR_YES_NO = ["Yes", "No"];
 const QR_PROCEED = ["Yes", "No", "Change information or value"];
+const QR_UPSELL_OFFER = ["Yes", "No", "Change information or value"];
 const QR_FURNACE = ["Yes", "No"]; // keep minimal
 const QR_DRYER = ["Yes", "No"]; // keep minimal
 
@@ -674,7 +684,10 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   }
 
   // NOTES
-  if (/special notes|special instructions|any notes|notes for the technician|instructions for our team/.test(low)) {
+  if (
+    /special notes|special instructions|any notes|notes for the technician|instructions for our team/.test(low) ||
+    /anything else we should note|note for your appointment|anything else we should know|anything else we should note for your appointment/.test(low)
+  ) {
     return QR_NOTES.slice();
   }
 
@@ -696,6 +709,15 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   // DUCT ADD-ONS (keep minimal yes/no to avoid "question button")
   if (/furnace cleaning/.test(low) && /\$/.test(rt) && /\?$/.test(rt)) return QR_FURNACE.slice();
   if (/dryer vent/.test(low) && /\$/.test(rt) && /\?$/.test(rt)) return QR_DRYER.slice();
+
+  // UPSELL OFFER (add/quote second service)
+  if (
+    (/would you like me to quote/.test(low) || /would you like to add/.test(low) || /before we move forward/.test(low)) &&
+    (/\bcarpet\b/.test(low) || /\bupholstery\b/.test(low)) &&
+    /\?$/.test(rt)
+  ) {
+    return QR_UPSELL_OFFER.slice();
+  }
 
   // FINAL CONFIRMATION ("anything you'd like to change ...?")
   if (/change before i finalize|before i finalize|finalize this\?/.test(low)) {
@@ -1010,6 +1032,13 @@ async function llmTurn(userText, state) {
   })();
   msgs.push({ role: "system", content: `CURRENT_STATE: ${JSON.stringify(stateSnapshot)}` });
   msgs.push({ role: "system", content: `ZIP_CHECK: ${JSON.stringify(zipHint)}` });
+  if (s._reuse_prev_info) {
+    msgs.push({
+      role: "system",
+      content:
+        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Proceed to the next unanswered booking questions.",
+    });
+  }
 
   // include recent conversation history so it behaves like OpenAI
   for (const m of s._history) {
@@ -1074,7 +1103,7 @@ async function llmTurn(userText, state) {
 async function handleCorePOST(req, res) {
   try {
     const body = req.body || {};
-    const user = extractUserText(body);
+    let user = extractUserText(body);
 
     let state = body.state ?? {};
     if (typeof state === "string") {
@@ -1143,6 +1172,34 @@ async function handleCorePOST(req, res) {
       });
     }
 
+    // Post-booking upsell flow: if user accepted duct upsell, ask if everything is the same location
+    if (state._post_booking_duct_upsell_pending && user) {
+      if (isYes(user)) {
+        state._post_booking_duct_upsell_pending = false;
+        state._second_work_order_active = true;
+        state._post_booking_same_location_pending = true;
+        return res.status(200).json({
+          reply: "Is everything the same location?",
+          quickReplies: QR_YES_NO,
+          state,
+        });
+      }
+      if (isNo(user)) {
+        state._post_booking_duct_upsell_pending = false;
+      }
+    }
+
+    if (state._post_booking_same_location_pending && user) {
+      state._post_booking_same_location_pending = false;
+      if (isYes(user)) {
+        state._reuse_prev_info = true;
+        user = "Everything is the same location and contact info as the previous booking.";
+      } else if (isNo(user)) {
+        state._reuse_prev_info = false;
+        user = "The location and contact info are different for this booking.";
+      }
+    }
+
     // Main turn
     const result = await llmTurn(user, state);
     const nextState = result.state || state;
@@ -1192,8 +1249,20 @@ async function handleCorePOST(req, res) {
         String(finalReply || "").trim() + "\n\nBefore you go — would you like to add air duct cleaning as well?";
       finalQuickReplies = QR_DUCT_UPSELL.slice();
       nextState.post_booking_duct_upsell_done = true;
+      nextState._post_booking_duct_upsell_pending = true;
     }
     // ========================================================================
+
+    // SECOND WORK ORDER ZAP (post-booking duct upsell)
+    if (nextState._second_work_order_active && looksFinalized && !nextState._second_bookingSent) {
+      try {
+        const payload = buildZapPayloadFromState({ ...nextState, booking_complete: true });
+        await sendBookingZapFormEncoded(payload);
+        nextState._second_bookingSent = true;
+      } catch (e) {
+        console.error("Second Booking Zap send failed", e);
+      }
+    }
 
     // FINAL quick replies: normalize so duct/date/zip/name rules are enforced
     finalQuickReplies = normalizeQuickRepliesForPrompt(finalReply, finalQuickReplies);
