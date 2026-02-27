@@ -605,6 +605,9 @@ const QR_PROCEED = ["Yes", "No", "Change information or value"];
 const QR_UPSELL_OFFER = ["Yes", "No", "Change information or value"];
 const QR_FURNACE = ["Yes", "No"]; // keep minimal
 const QR_DRYER = ["Yes", "No"]; // keep minimal
+const QR_HVAC_SYSTEMS = ["1", "2", "3", "4", "5", "Other"];
+const QR_APT_FLOOR = ["1st floor", "2nd floor", "3rd floor", "Other"];
+const QR_POST_DUCT_UPSELL = ["Yes, add carpet/upholstery", "No thanks"];
 
 const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "Dining chairs", "Mattress"];
 const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
@@ -745,6 +748,16 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_CARPET_AREAS.slice();
   }
 
+  // HVAC SYSTEMS
+  if (/how many hvac systems/.test(low) || /ac units/.test(low)) {
+    return QR_HVAC_SYSTEMS.slice();
+  }
+
+  // APARTMENT FLOOR
+  if (/what floor is your apartment/.test(low) || /floor.*apartment/.test(low)) {
+    return QR_APT_FLOOR.slice();
+  }
+
   // DUCT PACKAGE SELECTION
   if (/would you like basic or deep/.test(low) || (/basic/.test(low) && /deep/.test(low) && /\?$/.test(rt) && /duct/.test(low))) {
     return QR_DUCT_PKG.slice();
@@ -766,6 +779,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   // POST-BOOKING DUCT UPSELL
   if (/before you go/.test(low) && /duct/.test(low)) {
     return QR_DUCT_UPSELL.slice();
+  }
+
+  // POST-BOOKING CARPET/UPHOLSTERY UPSELL (after duct)
+  if (/before you go/.test(low) && (/carpet/.test(low) || /upholstery/.test(low))) {
+    return QR_POST_DUCT_UPSELL.slice();
   }
 
   // Otherwise: sanitize existing qrs (remove long/question-like buttons)
@@ -926,7 +944,7 @@ After in-area ZIP confirmed:
 11 Notes
 
 FINAL CONFIRMATION (LOCKED)
-Provide a clean summary including Total: $___ and ask:
+Provide a clean summary that includes: Service, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, and Total. Do NOT include the customer name in the summary. Then ask:
 “Is there anything you’d like to change before I finalize this?”
 If they say no, finalize and include:
 “If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
@@ -1369,6 +1387,18 @@ async function handleCorePOST(req, res) {
       finalQuickReplies = QR_DUCT_UPSELL.slice();
       nextState.post_booking_duct_upsell_done = true;
       nextState._post_booking_duct_upsell_pending = true;
+    }
+    // ========================================================================
+
+    // ===================== POST-BOOKING CARPET/UPHOLSTERY UPSELL (after duct) =====================
+    const hasCarpetOrUph = /carpet|upholstery/i.test(svc) || /carpet|upholstery/i.test(bd);
+    const postDuctUpsellDone = !!nextState.post_booking_carpet_upsell_done;
+    if (bookingComplete && looksFinalized && ductAlready && !hasCarpetOrUph && !postDuctUpsellDone) {
+      finalReply =
+        String(finalReply || "").trim() +
+        "\n\nBefore you go — would you like to add carpet or upholstery cleaning as well?";
+      finalQuickReplies = QR_POST_DUCT_UPSELL.slice();
+      nextState.post_booking_carpet_upsell_done = true;
     }
     // ========================================================================
 
