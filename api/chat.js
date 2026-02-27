@@ -583,7 +583,7 @@ const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
-const QR_FINAL_CONFIRM = ["Yes", "No", "Change information or value"]; // matches "anything you'd like to change?"
+const QR_FINAL_CONFIRM = ["No", "Yes", "Change information or value"]; // matches "anything you'd like to change?"
 const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
 
 const QR_DUCT_PKG = ["Basic", "Deep"];
@@ -600,6 +600,7 @@ const QR_CARPET_AREAS = [
   "3 rooms",
   "2 rooms, hallway",
   "3 rooms, hallway, stairs",
+  "Other",
 ];
 
 function _pad2(n) {
