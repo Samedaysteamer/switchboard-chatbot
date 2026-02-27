@@ -221,6 +221,19 @@ function isNo(text = "") {
   return t === "no" || t.startsWith("no,") || t.startsWith("n ");
 }
 
+function looksLikeFullName(value = "") {
+  const s = String(value || "").trim();
+  if (!s) return false;
+  if (s.length > 60) return false;
+  if (/@|\d/.test(s)) return false;
+  if (/^(yes|no|house|apartment|basic|deep|proceed|finalize|carpet|upholstery|ducts?)$/i.test(s))
+    return false;
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  if (parts.some((p) => p.length < 2)) return false;
+  return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)+$/.test(s);
+}
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -1066,7 +1079,7 @@ async function llmTurn(userText, state) {
     msgs.push({
       role: "system",
       content:
-        "NOTE: This is a NEW, separate work order for Air Duct Cleaning. Do NOT reference the previous carpet/upholstery booking. Provide a FULL booking summary with Service, Address, Name, Phone, Email, Date, Arrival Window, Pets, House/Apartment, Floor (if apartment), Outdoor Water, Notes, and Total. Then ask: “Is there anything you’d like to change before I finalize this?”",
+        "NOTE: This is a NEW, separate work order for Air Duct Cleaning. Do NOT reference the previous carpet/upholstery booking. Provide a FULL booking summary with Service, Address, Name, Phone, Email, Date, Arrival Window, Pets, House/Apartment, Floor (if apartment), Outdoor Water, Notes, and Total. The customer name must be the customer’s actual name (never use service/package names like Basic/Deep as a name). Then ask: “Is there anything you’d like to change before I finalize this?”",
     });
   }
 
@@ -1121,6 +1134,18 @@ async function llmTurn(userText, state) {
   if (typeof s.zip === "string") {
     const z = normalizeZip(s.zip);
     if (z) s.zip = z;
+  }
+
+  // If this is a second work order and the customer confirmed same info,
+  // lock contact fields to the original values and prevent bad overwrites.
+  if (s._second_work_order_active && s._reuse_prev_info && s._prev_contact) {
+    if (s._prev_contact.name) s.name = s._prev_contact.name;
+    if (s._prev_contact.phone) s.phone = s._prev_contact.phone;
+    if (s._prev_contact.email) s.email = s._prev_contact.email;
+    if (s._prev_contact.address) s.address = s._prev_contact.address;
+  } else if (s._second_work_order_active && s.name && !looksLikeFullName(s.name)) {
+    // Prevent service names like "Deep" from becoming the customer name
+    delete s.name;
   }
 
   // QUICK REPLIES (FIX ONLY): deterministic normalizer
@@ -1223,6 +1248,12 @@ async function handleCorePOST(req, res) {
     if (state._post_booking_same_location_pending && user) {
       state._post_booking_same_location_pending = false;
       if (isYes(user)) {
+        state._prev_contact = {
+          name: state.name || "",
+          phone: state.phone || "",
+          email: state.email || "",
+          address: state.address || state.Address || state.service_address || "",
+        };
         state._reuse_prev_info = true;
         // New work order: reset service-specific fields so duct flow starts clean
         state.booking_complete = false;
@@ -1256,6 +1287,15 @@ async function handleCorePOST(req, res) {
         state.total_price = 0;
         state.selected_service = "Air Duct";
         state.Cleaning_Breakdown = "Air duct cleaning";
+        delete state.name;
+        delete state.name2025;
+        delete state.phone;
+        delete state.phone2025;
+        delete state.email;
+        delete state.email2025;
+        delete state.address;
+        delete state.Address;
+        delete state.service_address;
         delete state.date;
         delete state.cleaningDate;
         delete state.CleaningDate;
