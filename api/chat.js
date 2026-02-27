@@ -260,6 +260,37 @@ function _isPastDate({ year, month, day }) {
   return day < today.day;
 }
 
+function _extractFloorNumber(text = "") {
+  const t = String(text || "").toLowerCase();
+  const num = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+  if (num) return parseInt(num[1], 10);
+  if (/\bfirst\b/.test(t)) return 1;
+  if (/\bsecond\b/.test(t)) return 2;
+  if (/\bthird\b/.test(t)) return 3;
+  if (/\bfourth\b/.test(t)) return 4;
+  if (/\bfifth\b/.test(t)) return 5;
+  return null;
+}
+
+function _lastAssistantAskedFloor(history = []) {
+  const hist = Array.isArray(history) ? history : [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i]?.role === "assistant") {
+      return /what floor/i.test(String(hist[i].content || ""));
+    }
+  }
+  return false;
+}
+
+function _extractFloorNumber(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return null;
+  const m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -1276,6 +1307,20 @@ async function handleCorePOST(req, res) {
       quickReplies: getNextDateQuickReplies(6),
       state,
     });
+  }
+
+  // Apartments above 3rd floor require manual review
+  const building = String(state.building || state.BuildingType || state.buildingType || "").toLowerCase();
+  if (building === "apartment" && _lastAssistantAskedFloor(state._history)) {
+    const floorNum = _extractFloorNumber(user);
+    if (floorNum && floorNum > 3) {
+      return res.status(200).json({
+        reply:
+          "Thanks for letting me know. Apartments above the 3rd floor require a quick review — someone will reach out to see if we can service it.",
+        quickReplies: [],
+        state,
+      });
+    }
   }
 
     // Post-booking upsell flow: if user accepted duct upsell, ask if everything is the same location
