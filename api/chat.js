@@ -282,15 +282,6 @@ function _lastAssistantAskedFloor(history = []) {
   return false;
 }
 
-function _extractFloorNumber(text = "") {
-  const t = String(text || "").trim().toLowerCase();
-  if (!t) return null;
-  const m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : null;
-}
-
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
