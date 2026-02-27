@@ -596,10 +596,10 @@ const QR_DRYER = ["Yes", "No"]; // keep minimal
 const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "Dining chairs", "Mattress"];
 const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
 const QR_CARPET_AREAS = [
-  "Two rooms",
-  "Three rooms, hallway, stairs",
-  "Three rooms, hallway, living room",
-  "Three rooms, hallway, living room, stairs",
+  "2 rooms",
+  "3 rooms, hallway, stairs",
+  "3 rooms, hallway, living room",
+  "3 rooms, hallway, living room, stairs",
 ];
 
 function _pad2(n) {
@@ -670,7 +670,7 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   }
 
   // FINAL CONFIRMATION ("anything you'd like to change ...?")
-  if (/change.*before i finalize|before i finalize|finalize this\?/.test(low)) {
+  if (/finaliz/.test(low) && /\?$/.test(rt)) {
     return QR_FINAL_CONFIRM.slice();
   }
 
@@ -718,7 +718,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   }
 
   // CARPET AREAS / ROOMS
-  if (/areas or rooms/.test(low) && /carpet cleaning/.test(low)) {
+  if (
+    /carpet/.test(low) &&
+    (/\brooms?\b/.test(low) || /\bareas?\b/.test(low) || /\brugs?\b/.test(low) || /\bhallway/.test(low) || /\bstairs?/.test(low)) &&
+    /\?$/.test(rt)
+  ) {
     return QR_CARPET_AREAS.slice();
   }
 
@@ -782,6 +786,7 @@ ABSOLUTE OUTPUT RULES (LOCKED)
 - ALL prices must be displayed in NUMBERS with $ (examples: $100, $150, $250, $500).
 - NEVER write prices in words.
 - NEVER explain pricing math or how prices are calculated.
+- NEVER say “per seat” or “$50 per seat” in customer messages. For upholstery pricing, only give the total price.
 - NEVER mention internal rules like “per area”, “billable areas”, “free hallway”, etc.
 - Ask ONLY ONE question per message.
 - NEVER repeat a question if the customer already provided the needed info.
@@ -813,7 +818,7 @@ If they say sofa/couch/loveseat/sectional: ask seat count:
 “How many people can it comfortably seat?”
 Treat sofa/couch/loveseat as seating pricing.
 Pricing:
-- Seating: $50 per seat
+- Seating total: $50 x seat count (internal only; do not say “per seat”)
 - If seat count 1–3: minimum $150
 - If seat count 4+ OR it’s a sectional: minimum $250
 Other items:
@@ -1059,7 +1064,7 @@ async function llmTurn(userText, state) {
     msgs.push({
       role: "system",
       content:
-        "NOTE: This is a NEW, separate work order for Air Duct Cleaning. Do NOT reference the previous carpet/upholstery booking in the summary. Provide a full booking summary for the duct service and ask the standard final confirmation question.",
+        "NOTE: This is a NEW, separate work order for Air Duct Cleaning. Do NOT reference the previous carpet/upholstery booking. Provide a FULL booking summary with Service, Address, Name, Phone, Email, Date, Arrival Window, Pets, House/Apartment, Floor (if apartment), Outdoor Water, Notes, and Total. Then ask: “Is there anything you’d like to change before I finalize this?”",
     });
   }
 
@@ -1200,6 +1205,7 @@ async function handleCorePOST(req, res) {
       if (isYes(user)) {
         state._post_booking_duct_upsell_pending = false;
         state._second_work_order_active = true;
+        state._second_bookingSent = false;
         state._post_booking_same_location_pending = true;
         return res.status(200).json({
           reply: "Is everything the same location?",
@@ -1220,7 +1226,7 @@ async function handleCorePOST(req, res) {
         state.booking_complete = false;
         state.total_price = 0;
         state.selected_service = "Air Duct";
-        state.Cleaning_Breakdown = "";
+        state.Cleaning_Breakdown = "Air duct cleaning";
         delete state.date;
         delete state.cleaningDate;
         delete state.CleaningDate;
@@ -1247,7 +1253,7 @@ async function handleCorePOST(req, res) {
         state.booking_complete = false;
         state.total_price = 0;
         state.selected_service = "Air Duct";
-        state.Cleaning_Breakdown = "";
+        state.Cleaning_Breakdown = "Air duct cleaning";
         delete state.date;
         delete state.cleaningDate;
         delete state.CleaningDate;
@@ -1325,7 +1331,11 @@ async function handleCorePOST(req, res) {
     // ========================================================================
 
     // SECOND WORK ORDER ZAP (post-booking duct upsell)
-    if (nextState._second_work_order_active && looksFinalized && !nextState._second_bookingSent) {
+    if (
+      nextState._second_work_order_active &&
+      (nextState.booking_complete || looksFinalized) &&
+      !nextState._second_bookingSent
+    ) {
       try {
         const payload = buildZapPayloadFromState({ ...nextState, booking_complete: true });
         await sendBookingZapFormEncoded(payload);
