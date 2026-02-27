@@ -583,7 +583,7 @@ const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
-const QR_FINAL_CONFIRM = ["No changes", "Make changes"]; // matches "anything you'd like to change?"
+const QR_FINAL_CONFIRM = ["Yes", "No", "Change information or value"]; // matches "anything you'd like to change?"
 const QR_DUCT_UPSELL = ["Yes, duct cleaning", "No thanks"];
 
 const QR_DUCT_PKG = ["Basic", "Deep"];
@@ -595,6 +595,12 @@ const QR_DRYER = ["Yes", "No"]; // keep minimal
 
 const QR_UPH_PIECES = ["Sofa", "Sectional", "Loveseat", "Recliner", "Ottoman", "Dining chairs", "Mattress"];
 const QR_SEAT_COUNTS = ["2", "3", "4", "5", "6", "7"];
+const QR_CARPET_AREAS = [
+  "Two rooms",
+  "Three rooms, hallway, stairs",
+  "Three rooms, hallway, living room",
+  "Three rooms, hallway, living room, stairs",
+];
 
 function _pad2(n) {
   return String(n).padStart(2, "0");
@@ -663,8 +669,18 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return getNextDateQuickReplies(6);
   }
 
+  // FINAL CONFIRMATION ("anything you'd like to change ...?")
+  if (/change.*before i finalize|before i finalize|finalize this\?/.test(low)) {
+    return QR_FINAL_CONFIRM.slice();
+  }
+
   // ARRIVAL WINDOW
-  if ((/arrival window|which.*window/.test(low)) && /8 to 12/.test(low) && /1 to 5/.test(low)) {
+  if (
+    (/arrival window|which.*window|works best/.test(low)) &&
+    /8 to 12/.test(low) &&
+    /1 to 5/.test(low) &&
+    /\?$/.test(rt)
+  ) {
     return QR_WINDOWS.slice();
   }
 
@@ -701,6 +717,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_SEAT_COUNTS.slice();
   }
 
+  // CARPET AREAS / ROOMS
+  if (/areas or rooms/.test(low) && /carpet cleaning/.test(low)) {
+    return QR_CARPET_AREAS.slice();
+  }
+
   // DUCT PACKAGE SELECTION
   if (/would you like basic or deep/.test(low) || (/basic/.test(low) && /deep/.test(low) && /\?$/.test(rt) && /duct/.test(low))) {
     return QR_DUCT_PKG.slice();
@@ -717,11 +738,6 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     /\?$/.test(rt)
   ) {
     return QR_UPSELL_OFFER.slice();
-  }
-
-  // FINAL CONFIRMATION ("anything you'd like to change ...?")
-  if (/change before i finalize|before i finalize|finalize this\?/.test(low)) {
-    return QR_FINAL_CONFIRM.slice();
   }
 
   // POST-BOOKING DUCT UPSELL
@@ -1039,6 +1055,13 @@ async function llmTurn(userText, state) {
         "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Proceed to the next unanswered booking questions.",
     });
   }
+  if (s._second_work_order_active) {
+    msgs.push({
+      role: "system",
+      content:
+        "NOTE: This is a NEW, separate work order for Air Duct Cleaning. Do NOT reference the previous carpet/upholstery booking in the summary. Provide a full booking summary for the duct service and ask the standard final confirmation question.",
+    });
+  }
 
   // include recent conversation history so it behaves like OpenAI
   for (const m of s._history) {
@@ -1193,10 +1216,58 @@ async function handleCorePOST(req, res) {
       state._post_booking_same_location_pending = false;
       if (isYes(user)) {
         state._reuse_prev_info = true;
-        user = "Everything is the same location and contact info as the previous booking.";
+        // New work order: reset service-specific fields so duct flow starts clean
+        state.booking_complete = false;
+        state.total_price = 0;
+        state.selected_service = "Air Duct";
+        state.Cleaning_Breakdown = "";
+        delete state.date;
+        delete state.cleaningDate;
+        delete state.CleaningDate;
+        delete state.window;
+        delete state.Window;
+        delete state.arrival_window;
+        delete state.arrivalWindow;
+        delete state.pets;
+        delete state.Pets;
+        delete state.building;
+        delete state.BuildingType;
+        delete state.buildingType;
+        delete state.outdoorWater;
+        delete state.OutdoorWater;
+        delete state.water;
+        delete state.waterSupply;
+        delete state.notes;
+        delete state.Notes;
+        user =
+          "Customer accepted air duct cleaning add-on. Start a NEW duct cleaning booking now. The location and contact info are the SAME as the previous booking.";
       } else if (isNo(user)) {
         state._reuse_prev_info = false;
-        user = "The location and contact info are different for this booking.";
+        // New work order: reset service-specific fields so duct flow starts clean
+        state.booking_complete = false;
+        state.total_price = 0;
+        state.selected_service = "Air Duct";
+        state.Cleaning_Breakdown = "";
+        delete state.date;
+        delete state.cleaningDate;
+        delete state.CleaningDate;
+        delete state.window;
+        delete state.Window;
+        delete state.arrival_window;
+        delete state.arrivalWindow;
+        delete state.pets;
+        delete state.Pets;
+        delete state.building;
+        delete state.BuildingType;
+        delete state.buildingType;
+        delete state.outdoorWater;
+        delete state.OutdoorWater;
+        delete state.water;
+        delete state.waterSupply;
+        delete state.notes;
+        delete state.Notes;
+        user =
+          "Customer accepted air duct cleaning add-on. Start a NEW duct cleaning booking now. The location and contact info are DIFFERENT for this booking.";
       }
     }
 
@@ -1259,6 +1330,7 @@ async function handleCorePOST(req, res) {
         const payload = buildZapPayloadFromState({ ...nextState, booking_complete: true });
         await sendBookingZapFormEncoded(payload);
         nextState._second_bookingSent = true;
+        nextState._second_work_order_active = false;
       } catch (e) {
         console.error("Second Booking Zap send failed", e);
       }
