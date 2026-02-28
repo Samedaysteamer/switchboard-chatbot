@@ -260,6 +260,28 @@ function _isPastDate({ year, month, day }) {
   return day < today.day;
 }
 
+function _extractFloorNumber(text = "") {
+  const t = String(text || "").toLowerCase();
+  const num = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+  if (num) return parseInt(num[1], 10);
+  if (/\bfirst\b/.test(t)) return 1;
+  if (/\bsecond\b/.test(t)) return 2;
+  if (/\bthird\b/.test(t)) return 3;
+  if (/\bfourth\b/.test(t)) return 4;
+  if (/\bfifth\b/.test(t)) return 5;
+  return null;
+}
+
+function _lastAssistantAskedFloor(history = []) {
+  const hist = Array.isArray(history) ? history : [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i]?.role === "assistant") {
+      return /floor/i.test(String(hist[i].content || ""));
+    }
+  }
+  return false;
+}
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -620,6 +642,8 @@ const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning
 const QR_WINDOWS = ["8 to 12", "1 to 5"];
 const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
+const QR_FLOOR = ["1st floor", "2nd floor", "3rd floor", "4th+ floor"];
+const QR_HVAC_COUNT = ["1", "2", "3", "4", "5+"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
 const QR_FINAL_CONFIRM = ["No", "Yes", "Change information or value"]; // matches "anything you'd like to change?"
@@ -729,9 +753,19 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_PETS.slice();
   }
 
+  // HVAC SYSTEM COUNT (numbers only)
+  if (/how many hvac systems|ac units/.test(low)) {
+    return QR_HVAC_COUNT.slice();
+  }
+
   // BUILDING
   if (/house or apartment|is this a house|is it a house|apartment\?/.test(low)) {
     return QR_BUILDING.slice();
+  }
+
+  // APARTMENT FLOOR
+  if (/what floor|which floor|apartment on/.test(low)) {
+    return QR_FLOOR.slice();
   }
 
   // OUTDOOR WATER
@@ -753,7 +787,7 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   }
 
   // SEAT / CUSHION COUNT
-  if (/how many .*?(seats|cushions)/.test(low) || /comfortably seat/.test(low)) {
+  if (/how many .*?(seats|cushions)/.test(low) || /comfortably seat|comfortably sit/.test(low)) {
     return QR_SEAT_COUNTS.slice();
   }
 
@@ -857,7 +891,7 @@ CARPET PRICING (LOCKED)
 UPHOLSTERY (LOCKED)
 Always ask what pieces they need cleaned first.
 If they say sofa/couch/loveseat/sectional: ask cushion count:
-“How many cushions does it have?”
+“How many people can it comfortably sit?”
 Treat sofa/couch/loveseat/sectional as cushion pricing.
 Pricing:
 - Cushion total: $50 x cushion count (internal only; do not say “per cushion”)
@@ -878,6 +912,7 @@ If bundle is active and upholstery subtotal would be under $100, treat upholster
 Never explain. Only show:
 “Bundle discount: -$50”
 “New combined total: $___”
+Then ask: “Would you like to proceed with booking?” (Do NOT ask for ZIP until they say yes.)
 
 UPSELL ORDERING (LOCKED)
 After customer says YES to proceed on:
@@ -953,6 +988,10 @@ After in-area ZIP confirmed:
 9 Floor (if apartment)
 10 Outdoor water supply
 11 Notes
+
+APARTMENT FLOOR (LOCKED)
+If the customer selects 4th floor or higher, say:
+“Thanks for letting me know. Apartments above the 3rd floor require a portable unit — someone will reach out to see if we can service it.”
 
 FINAL CONFIRMATION (LOCKED)
 Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Never say “same as previous.” Then ask:
@@ -1101,7 +1140,7 @@ async function llmTurn(userText, state) {
     msgs.push({
       role: "system",
       content:
-        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Ask ONLY for date, arrival window, and notes. Do NOT ask about pets/house/outdoor water. In the final summary, show the full address (never 'same as previous').",
+        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Do NOT ask about pets/house/outdoor water/floor. You MUST still complete the full duct pricing flow (HVAC systems, Basic/Deep selection, add-ons) and get pricing approval before asking for date, arrival window, and notes. In the final summary, show the full address (never 'same as previous').",
     });
   }
   if (s._second_work_order_active) {
@@ -1262,6 +1301,18 @@ async function handleCorePOST(req, res) {
     return res.status(200).json({
       reply: "That date has already passed. What date would you like to schedule?",
       quickReplies: getNextDateQuickReplies(6),
+      state,
+    });
+  }
+
+  // Apartment 4th+ floor: stop flow and notify manual review
+  const floorNum = _extractFloorNumber(user);
+  const inFloorStep = _lastAssistantAskedFloor(state._history) || /floor/i.test(String(user || ""));
+  if (floorNum && floorNum >= 4 && inFloorStep) {
+    return res.status(200).json({
+      reply:
+        "Thanks for letting me know. Apartments above the 3rd floor require a portable unit — someone will reach out to see if we can service it.",
+      quickReplies: [],
       state,
     });
   }
