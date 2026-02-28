@@ -643,6 +643,7 @@ const QR_WINDOWS = ["8 to 12", "1 to 5"];
 const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
 const QR_FLOOR = ["1st floor", "2nd floor", "3rd floor", "4th+ floor"];
+const QR_HVAC_COUNT = ["1", "2", "3", "4", "5+"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
 const QR_FINAL_CONFIRM = ["No", "Yes", "Change information or value"]; // matches "anything you'd like to change?"
@@ -752,6 +753,11 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_PETS.slice();
   }
 
+  // HVAC SYSTEM COUNT (numbers only)
+  if (/how many hvac systems|ac units/.test(low)) {
+    return QR_HVAC_COUNT.slice();
+  }
+
   // BUILDING
   if (/house or apartment|is this a house|is it a house|apartment\?/.test(low)) {
     return QR_BUILDING.slice();
@@ -781,7 +787,7 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   }
 
   // SEAT / CUSHION COUNT
-  if (/how many .*?(seats|cushions)/.test(low) || /comfortably seat/.test(low)) {
+  if (/how many .*?(seats|cushions)/.test(low) || /comfortably seat|comfortably sit/.test(low)) {
     return QR_SEAT_COUNTS.slice();
   }
 
@@ -885,7 +891,7 @@ CARPET PRICING (LOCKED)
 UPHOLSTERY (LOCKED)
 Always ask what pieces they need cleaned first.
 If they say sofa/couch/loveseat/sectional: ask cushion count:
-“How many cushions does it have?”
+“How many people can it comfortably sit?”
 Treat sofa/couch/loveseat/sectional as cushion pricing.
 Pricing:
 - Cushion total: $50 x cushion count (internal only; do not say “per cushion”)
