@@ -1134,7 +1134,7 @@ async function llmTurn(userText, state) {
     msgs.push({
       role: "system",
       content:
-        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Ask ONLY for date, arrival window, and notes. Do NOT ask about pets/house/outdoor water. In the final summary, show the full address (never 'same as previous').",
+        "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Do NOT ask about pets/house/outdoor water/floor. You MUST still complete the full duct pricing flow (HVAC systems, Basic/Deep selection, add-ons) and get pricing approval before asking for date, arrival window, and notes. In the final summary, show the full address (never 'same as previous').",
     });
   }
   if (s._second_work_order_active) {
