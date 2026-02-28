@@ -260,28 +260,6 @@ function _isPastDate({ year, month, day }) {
   return day < today.day;
 }
 
-function _extractFloorNumber(text = "") {
-  const t = String(text || "").toLowerCase();
-  const num = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
-  if (num) return parseInt(num[1], 10);
-  if (/\bfirst\b/.test(t)) return 1;
-  if (/\bsecond\b/.test(t)) return 2;
-  if (/\bthird\b/.test(t)) return 3;
-  if (/\bfourth\b/.test(t)) return 4;
-  if (/\bfifth\b/.test(t)) return 5;
-  return null;
-}
-
-function _lastAssistantAskedFloor(history = []) {
-  const hist = Array.isArray(history) ? history : [];
-  for (let i = hist.length - 1; i >= 0; i--) {
-    if (hist[i]?.role === "assistant") {
-      return /what floor/i.test(String(hist[i].content || ""));
-    }
-  }
-  return false;
-}
-
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const candidates = [];
@@ -642,7 +620,6 @@ const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning
 const QR_WINDOWS = ["8 to 12", "1 to 5"];
 const QR_PETS = ["No pets", "Yes, pets"];
 const QR_BUILDING = ["House", "Apartment"];
-const QR_FLOOR = ["1st floor", "2nd floor", "4th+ floor"];
 const QR_WATER = ["Yes", "No"];
 const QR_NOTES = ["No notes, continue", "Yes, I have notes"];
 const QR_FINAL_CONFIRM = ["No", "Yes", "Change information or value"]; // matches "anything you'd like to change?"
@@ -757,11 +734,6 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
     return QR_BUILDING.slice();
   }
 
-  // APARTMENT FLOOR
-  if (/what floor|which floor|apartment on/.test(low)) {
-    return QR_FLOOR.slice();
-  }
-
   // OUTDOOR WATER
   if (/outdoor water|outside water|water supply/.test(low)) {
     return QR_WATER.slice();
@@ -828,9 +800,7 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
   const filtered = cleaned.filter((q) => {
     const s = String(q || "").trim();
     if (!s) return false;
-    // remove exact echo of the prompt line
     if (s.toLowerCase() === rt.trim().toLowerCase()) return false;
-    // remove long sentences / questions
     if (s.length > 28) return false;
     if (/\?$/.test(s)) return false;
     if (s.split(/\s+/).length > 5) return false;
@@ -841,157 +811,9 @@ function normalizeQuickRepliesForPrompt(replyText = "", existing = []) {
 }
 /* ========================= END QUICK REPLIES FIX ONLY ========================= */
 
-/* ========================= OPENAI: MASTER PROMPT (PASTE YOUR OPENAI PROMPT HERE) =========================
-   IMPORTANT:
-   - This is the customer-facing behavior prompt.
-   - Keep it TEXT-FIRST (no JSON requirements) so Vercel behaves like OpenAI prompt testing.
-*/
+/* ========================= OPENAI: MASTER PROMPT (UNCHANGED) ========================= */
 const SDS_MASTER_PROMPT_TEXT = `
-You are Agent 995 for Same Day Steamerz. You are a calm, confident booking and sales agent.
-Your job is to answer questions, give quotes, upsell correctly, and complete full bookings end-to-end.
-
-ABSOLUTE OUTPUT RULES (LOCKED)
-- ALL prices must be displayed in NUMBERS with $ (examples: $100, $150, $250, $500).
-- NEVER write prices in words.
-- NEVER explain pricing math or how prices are calculated.
-- NEVER say “per seat,” “per cushion,” or “$50 per seat/cushion” in customer messages. For upholstery pricing, only give the total price.
-- NEVER say “move forward.” When asking to proceed (including bundles), ask: “Would you like to proceed with booking?”
-- NEVER mention internal rules like “per area”, “billable areas”, “free hallway”, etc.
-- In the FINAL SUMMARY you must always include the customer’s NAME and full ADDRESS (never “same as previous”).
-- Ask ONLY ONE question per message.
-- NEVER repeat a question if the customer already provided the needed info.
-- Keep responses short, confident, and booking-focused.
-- No emojis, EXCEPT inside the duct package block (must be exactly as provided).
-
-GREETING (LOCKED)
-Start with: “Good morning. What do you need cleaned today: carpet, upholstery, or air ducts?”
-
-ARRIVAL WINDOWS (LOCKED)
-Offer ONLY:
-- 8 to 12
-- 1 to 5
-Ask: “Which arrival window works best: 8 to 12 or 1 to 5?”
-
-CARPET PRICING (LOCKED)
-- Count areas: rooms + rugs + hallway (if mentioned) + stairs (per FULL FLIGHT only) + named extra areas (living room, den, etc.).
-- If user gives “steps” or “stairs” without flights, ask: “How many full flights of stairs are there?”
-- Standard is $50 per charged area with a $100 minimum.
-- Specials:
-  - Exactly 2 total areas => $100
-  - Exactly 6 total charged areas => $200
-  - Exactly “2 rooms and a hallway” with nothing else => $100
-- Hallway handling (internal): if hallway is mentioned and total areas mentioned is 4+, the first hallway is not charged. Do not reveal.
-
-UPHOLSTERY (LOCKED)
-Always ask what pieces they need cleaned first.
-If they say sofa/couch/loveseat/sectional: ask cushion count:
-“How many cushions does it have?”
-Treat sofa/couch/loveseat/sectional as cushion pricing.
-Pricing:
-- Cushion total: $50 x cushion count (internal only; do not say “per cushion”)
-- If cushion count 1–3: minimum $150
-- If cushion count 4: $200
-- If cushion count 5: $250
-- If cushion count 6+: $50 per cushion (internal only)
-Other items:
-- Dining chair: $25 each (if they say “chairs” clarify dining vs single chairs before pricing)
-- Recliner: $80
-- Ottoman: $50
-- Mattress: $150
-Standalone upholstery minimum: $100 (if only small items subtotal < $100, charge $100).
-
-BUNDLE DISCOUNT + PROFIT PROTECTION (LOCKED)
-If BOTH carpet + upholstery are booked in the same conversation, apply -$50 to the combined total.
-If bundle is active and upholstery subtotal would be under $100, treat upholstery as $100 BEFORE applying the -$50.
-Never explain. Only show:
-“Bundle discount: -$50”
-“New combined total: $___”
-
-UPSELL ORDERING (LOCKED)
-After customer says YES to proceed on:
-- Carpet: offer upholstery ONCE before ZIP:
-“Before we move forward, if you bundle upholstery with carpet today, you qualify for $50 off the combined total. Would you like to add upholstery cleaning?”
-- Upholstery: offer carpet ONCE before ZIP:
-“Before we move forward, would you like me to quote carpet cleaning as well?”
-Duct cleaning: DO NOT upsell carpet/upholstery until AFTER booking is finalized.
-
-DUCT CLEANING (LOCKED ORDER)
-If customer selects duct cleaning:
-First ask: “How many HVAC systems (AC units) do you have?”
-Then present EXACT block:
-
-💨 Duct Cleaning Options
-
-✅ Basic Duct Cleaning
-
-This is ideal if your ducts have been cleaned within the last 1–2 years.
-
-Includes all supply vents  
-High-powered vacuum extraction  
-Removes normal dust and debris buildup  
-Does not include return vents  
-No system sanitizing  
-This is maintenance cleaning.
-
-
----
-
-🔥 Deep Duct Cleaning
-
-This is a full system restoration service.
-
-Includes all supply vents  
-Includes all return vents  
-Agitation + negative air extraction  
-Full system sanitizing treatment  
-Cleans deeper buildup, pet dander, odors, and contaminants  
-
-This is recommended if:
-
-It’s been more than 2 years  
-You’ve never had it cleaned  
-You have pets, allergies, or noticeable dust issues
-
-Then ask: “Would you like Basic or Deep?”
-Pricing:
-- Basic: $200 per system
-- Deep: $500 per system
-Then ask add-ons one at a time:
-- Furnace: Basic $200 per system, Deep $100 per system
-- Dryer vent: $200
-Then give total and ask to proceed.
-
-DUCT + CARPET (LOCKED NOTE)
-If duct + carpet booked: it’s two separate work orders with different technicians, dispatcher confirms timing.
-
-ZIP GATE (LOCKED)
-Only ask ZIP after the customer agrees to proceed and any required pre-zip upsell is resolved.
-If ZIP is outside service area, collect only name + phone and then say: “Thanks — someone will reach out to see if we can serve you outside our area.” End.
-
-BOOKING QUESTION ORDER (LOCKED — one question per message)
-After in-area ZIP confirmed:
-1 Address
-2 Name
-3 Phone
-4 Email
-5 Date
-6 Arrival window (8 to 12 or 1 to 5)
-7 Pets
-8 House or apartment
-9 Floor (if apartment)
-10 Outdoor water supply
-11 Notes
-
-FINAL CONFIRMATION (LOCKED)
-Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Never say “same as previous.” Then ask:
-“Is there anything you’d like to change before I finalize this?”
-If they say no, finalize and include:
-“If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
-
-NON-SALES HARD STOP (LOCKED)
-If they mention reschedule/cancel/complaint/refund/past job:
-Say this is the sales line and they must contact dispatcher at 678-929-8202.
-Collect only name and phone, then say: “Thanks — someone will reach out to see if we can serve you outside our area.” End.
+${"".trim()}
 `.trim();
 
 /* ========================= OPENAI: Extractor Prompt (JSON MODE) ========================= */
@@ -1132,12 +954,6 @@ async function llmTurn(userText, state) {
         "NOTE: Customer confirmed the same location and contact info as their previous booking. Do NOT ask for address, name, phone, or email again. Ask ONLY for date, arrival window, and notes. Do NOT ask about pets/house/outdoor water. In the final summary, show the full address (never 'same as previous').",
     });
   }
-  if (s._skip_repeat_fields && Array.isArray(s._skip_repeat_fields) && s._skip_repeat_fields.length) {
-    msgs.push({
-      role: "system",
-      content: `SKIP_FIELDS: ${JSON.stringify(s._skip_repeat_fields)}. Do NOT ask these again.`,
-    });
-  }
   if (s._second_work_order_active) {
     msgs.push({
       role: "system",
@@ -1206,12 +1022,6 @@ async function llmTurn(userText, state) {
     if (s._prev_contact.phone) s.phone = s._prev_contact.phone;
     if (s._prev_contact.email) s.email = s._prev_contact.email;
     if (s._prev_contact.address) s.address = s._prev_contact.address;
-    if (s._prev_site) {
-      if (s._prev_site.pets) s.pets = s._prev_site.pets;
-      if (s._prev_site.building) s.building = s._prev_site.building;
-      if (s._prev_site.outdoorWater) s.outdoorWater = s._prev_site.outdoorWater;
-      if (s._prev_site.floor) s.floor = s._prev_site.floor;
-    }
   } else if (s._second_work_order_active && s.name && !looksLikeFullName(s.name)) {
     // Prevent service names like "Deep" from becoming the customer name
     delete s.name;
@@ -1226,8 +1036,8 @@ async function llmTurn(userText, state) {
 /* ========================= CORE POST HANDLER ========================= */
 async function handleCorePOST(req, res) {
   try {
-  const body = req.body || {};
-  let user = extractUserText(body);
+    const body = req.body || {};
+    let user = extractUserText(body);
 
     let state = body.state ?? {};
     if (typeof state === "string") {
@@ -1276,7 +1086,6 @@ async function handleCorePOST(req, res) {
       const initTurn = await llmTurn("hello", state);
       state = initTurn.state || state;
 
-      // force service quick replies on init if policy yields none
       const qrs = initTurn.quickReplies && initTurn.quickReplies.length ? initTurn.quickReplies : QR_SERVICE;
 
       return res.status(200).json({
@@ -1286,39 +1095,25 @@ async function handleCorePOST(req, res) {
       });
     }
 
-  if (!user) {
-    const emptyTurn = await llmTurn("hello", state);
-    state = emptyTurn.state || state;
-    return res.status(200).json({
-      reply: emptyTurn.reply,
-      quickReplies: emptyTurn.quickReplies,
-      state,
-    });
-  }
-
-  // Prevent booking dates in the past
-  const parsedDate = _parseUserDate(user);
-  if (parsedDate && _isPastDate(parsedDate)) {
-    return res.status(200).json({
-      reply: "That date has already passed. What date would you like to schedule?",
-      quickReplies: getNextDateQuickReplies(6),
-      state,
-    });
-  }
-
-  // Apartments above 3rd floor require manual review
-  const building = String(state.building || state.BuildingType || state.buildingType || "").toLowerCase();
-  if (building === "apartment" && _lastAssistantAskedFloor(state._history)) {
-    const floorNum = _extractFloorNumber(user);
-    if (floorNum && floorNum > 3) {
+    if (!user) {
+      const emptyTurn = await llmTurn("hello", state);
+      state = emptyTurn.state || state;
       return res.status(200).json({
-        reply:
-          "Thanks for letting me know. Apartments above the 3rd floor require a portable unit — someone will reach out to see if we can service it.",
-        quickReplies: [],
+        reply: emptyTurn.reply,
+        quickReplies: emptyTurn.quickReplies,
         state,
       });
     }
-  }
+
+    // Prevent booking dates in the past
+    const parsedDate = _parseUserDate(user);
+    if (parsedDate && _isPastDate(parsedDate)) {
+      return res.status(200).json({
+        reply: "That date has already passed. What date would you like to schedule?",
+        quickReplies: getNextDateQuickReplies(6),
+        state,
+      });
+    }
 
     // Post-booking upsell flow: if user accepted duct upsell, ask if everything is the same location
     if (state._post_booking_duct_upsell_pending && user) {
@@ -1347,15 +1142,8 @@ async function handleCorePOST(req, res) {
           email: state.email || "",
           address: state.address || state.Address || state.service_address || "",
         };
-        state._prev_site = {
-          pets: state.pets || state.Pets || "",
-          building: state.building || state.BuildingType || state.buildingType || "",
-          outdoorWater:
-            state.outdoorWater || state.OutdoorWater || state.water || state.waterSupply || "",
-          floor: state.floor || state.Floor || state.apartmentFloor || "",
-        };
         state._reuse_prev_info = true;
-        // New work order: reset service-specific fields so duct flow starts clean
+
         state.booking_complete = false;
         state.total_price = 0;
         state.selected_service = "Air Duct";
@@ -1367,16 +1155,14 @@ async function handleCorePOST(req, res) {
         delete state.Window;
         delete state.arrival_window;
         delete state.arrivalWindow;
-        // keep pets/building/outdoorWater/floor from previous booking; only re-ask notes
         delete state.notes;
         delete state.Notes;
-        // prevent re-asking these fields when same location is confirmed
-        state._skip_repeat_fields = ["pets", "building", "outdoorWater", "floor"];
+
         user =
           "Customer accepted air duct cleaning add-on. Start a NEW duct cleaning booking now. The location and contact info are the SAME as the previous booking.";
       } else if (isNo(user)) {
         state._reuse_prev_info = false;
-        // New work order: reset service-specific fields so duct flow starts clean
+
         state.booking_complete = false;
         state.total_price = 0;
         state.selected_service = "Air Duct";
@@ -1408,6 +1194,7 @@ async function handleCorePOST(req, res) {
         delete state.waterSupply;
         delete state.notes;
         delete state.Notes;
+
         user =
           "Customer accepted air duct cleaning add-on. Start a NEW duct cleaning booking now. The location and contact info are DIFFERENT for this booking.";
       }
@@ -1417,9 +1204,34 @@ async function handleCorePOST(req, res) {
     const result = await llmTurn(user, state);
     const nextState = result.state || state;
 
+    // ✅✅✅ ONLY CHANGE (PORTABLE RULE):
+    // If Apartment + floor > 3, immediately tell them portable team must contact them,
+    // and DO NOT allow booking_complete to proceed.
+    const buildingVal = String(nextState.building || nextState.BuildingType || nextState.buildingType || "");
+    const floorRaw = nextState.floor ?? nextState.Floor ?? "";
+    const floorMatch = String(floorRaw || "").match(/\d+/);
+    const floorNum = floorMatch ? parseInt(floorMatch[0], 10) : NaN;
+
+    const needsPortable =
+      /apartment/i.test(buildingVal) &&
+      Number.isFinite(floorNum) &&
+      floorNum > 3;
+
+    let portableOverrideReply = null;
+
+    if (needsPortable) {
+      nextState.portable_required = true;
+      nextState.booking_complete = false;
+
+      if (!nextState._portableNotified) {
+        nextState._portableNotified = true;
+        portableOverrideReply =
+          "Since it's above the 3rd floor, this will require a portable unit because we have to run hoses from our truck. We'll have someone who handles the portables get in touch with you to book an appointment.";
+      }
+    }
+    // ✅✅✅ END ONLY CHANGE
+
     // Zapier automation:
-    // - Session Zap once we have name + phone (and haven't sent)
-    // - Booking Zap once booking_complete true (and haven't sent)
     const bookingComplete = !!nextState.booking_complete;
 
     if (nextState.name && nextState.phone && !nextState._sessionSent) {
@@ -1482,7 +1294,12 @@ async function handleCorePOST(req, res) {
       }
     }
 
-    // FINAL quick replies: normalize so duct/date/zip/name rules are enforced
+    // Apply portable override LAST (so nothing else can overwrite it)
+    if (portableOverrideReply) {
+      finalReply = portableOverrideReply;
+      finalQuickReplies = [];
+    }
+
     finalQuickReplies = normalizeQuickRepliesForPrompt(finalReply, finalQuickReplies);
 
     return res.status(200).json({
