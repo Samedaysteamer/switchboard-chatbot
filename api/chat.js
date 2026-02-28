@@ -911,8 +911,7 @@ BUNDLE DISCOUNT + PROFIT PROTECTION (LOCKED)
 If BOTH carpet + upholstery are booked in the same conversation, apply -$50 to the combined total.
 If bundle is active and upholstery subtotal would be under $100, treat upholstery as $100 BEFORE applying the -$50.
 Never explain. Only show:
-“Bundle discount: -$50”
-“New combined total: $___”
+“New combined total: $___” (already includes the -$50)
 Then ask: “Would you like to proceed with booking?” (Do NOT ask for ZIP until they say yes.)
 
 UPSELL ORDERING (LOCKED)
