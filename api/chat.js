@@ -284,35 +284,44 @@ function _lastAssistantAskedFloor(history = []) {
 
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
-  const candidates = [];
-  const push = (v) => {
-    if (typeof v === "string") {
-      const s = v.trim();
-      if (s) candidates.push(s);
-    }
+  const asText = (v) => {
+    if (typeof v !== "string") return "";
+    const s = v.trim();
+    return s || "";
   };
 
-  push(body.text);
-  push(body.message);
-  push(body.input);
-  push(body.payload);
-  push(body.content);
-  push(body.question);
-  push(body.prompt);
-  push(body.user_message);
-  push(body.userMessage);
+  // Priority order: explicit user-input fields first.
+  const direct = [
+    body.text,
+    body.message,
+    body.input,
+    body.user_message,
+    body.userMessage,
+    body.payload,
+    body.question,
+    body.prompt,
+    body?.message?.text,
+    body?.data?.message,
+    body?.data?.text,
+    body?.event?.message?.text,
+    body?.event?.text,
+    body?.entry?.[0]?.messaging?.[0]?.message?.text,
+  ];
 
-  push(body?.message?.text);
-  push(body?.data?.message);
-  push(body?.data?.text);
-  push(body?.event?.message?.text);
-  push(body?.event?.text);
-  push(body?.entry?.[0]?.messaging?.[0]?.message?.text);
-
-  if (Array.isArray(body?.content?.messages)) {
-    for (const m of body.content.messages) push(m?.text);
+  for (const v of direct) {
+    const s = asText(v);
+    if (s) return s;
   }
 
+  // If a messages array exists, use the latest text message.
+  if (Array.isArray(body?.content?.messages)) {
+    for (let i = body.content.messages.length - 1; i >= 0; i--) {
+      const s = asText(body.content.messages[i]?.text);
+      if (s) return s;
+    }
+  }
+
+  // Last-resort scan: ignore known transport/state fields.
   const deny = new Set([
     "state",
     "state_json",
@@ -324,14 +333,18 @@ function extractUserText(body = {}) {
     "hub.challenge",
     "object",
     "entry",
+    "reply",
+    "reply_text",
+    "version",
   ]);
+
   for (const [k, v] of Object.entries(body || {})) {
     if (deny.has(k)) continue;
-    if (typeof v === "string") push(v);
+    const s = asText(v);
+    if (s) return s;
   }
 
-  candidates.sort((a, b) => b.length - a.length);
-  return candidates[0] || "";
+  return "";
 }
 
 /* ========================= ZIP Gate Data ========================= */
