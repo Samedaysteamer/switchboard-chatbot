@@ -232,6 +232,19 @@ function clampHistory(arr, maxLen = 18) {
   return a.slice(a.length - maxLen);
 }
 
+function detectLeadSource(body = {}) {
+  const source = String(body.source || "").trim().toLowerCase();
+  const channel = String(body.channel || "").trim().toLowerCase();
+
+  if (source === "meta" || source === "manychat" || channel === "messenger" || channel === "facebook") {
+    return "facebook";
+  }
+  if (source === "web" || channel === "web") return "web";
+  if (source) return source;
+  if (channel) return channel;
+  return "";
+}
+
 function isYes(text = "") {
   const t = String(text || "").trim().toLowerCase();
   return t === "yes" || t.startsWith("yes,") || t.startsWith("y ");
@@ -632,6 +645,9 @@ function buildZapPayloadFromState(state = {}) {
   const outdoorWater = _first(state.outdoorWater, state.OutdoorWater, state.water, state.waterSupply, d.outdoorWater);
   const building = _first(state.building, state.BuildingType, state.buildingType, d.building);
   const notes = _first(state.notes, state.Notes, d.notes);
+  const leadSource = String(
+    _first(state.lead_source, state.leadSource, state.channel_source, state.sourceTag)
+  ).toLowerCase();
 
   const cleaningBreakdown = _first(
     state.Cleaning_Breakdown,
@@ -665,6 +681,8 @@ function buildZapPayloadFromState(state = {}) {
     OutdoorWater: outdoorWater || "",
     BuildingType: building || "",
     Notes: notes || "",
+    lead_source: leadSource || "",
+    is_facebook_booking: leadSource === "facebook" ? "yes" : "no",
     booking_complete: !!state.booking_complete,
   };
 }
@@ -1138,7 +1156,7 @@ function hydrateStateFromUserText(userText, state) {
     const z = normalizeZip(txt);
     if (z) state.zip = z;
   }
-  if (!state.address && !state.Address && !state.service_address) {
+  if (!hasUsableAddress(state)) {
     const a = extractAddress(txt);
     if (a) state.address = a;
   }
@@ -1164,6 +1182,9 @@ function hasUsableAddress(state = {}) {
 async function llmTurn(userText, state) {
   const s = state && typeof state === "object" ? state : {};
   s._history = clampHistory(s._history, 18);
+  const prevGoodAddress = hasUsableAddress(s)
+    ? String(s.address || s.Address || s.service_address || "").trim()
+    : "";
 
   // Quietly hydrate from raw text (does not affect customer reply)
   hydrateStateFromUserText(userText, s);
@@ -1250,6 +1271,11 @@ async function llmTurn(userText, state) {
     if (z) s.zip = z;
   }
 
+  // Do not let placeholder/missing extractor output wipe a previously valid address.
+  if (prevGoodAddress && !hasUsableAddress(s)) {
+    s.address = prevGoodAddress;
+  }
+
   // If this is a second work order and the customer confirmed same info,
   // lock contact fields to the original values and prevent bad overwrites.
   if (s._second_work_order_active && s._reuse_prev_info && s._prev_contact) {
@@ -1299,6 +1325,9 @@ async function handleCorePOST(req, res) {
     if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
     state = enforceSessionTTL(state);
     if (!Array.isArray(state._history)) state._history = [];
+
+    const detectedSource = detectLeadSource(body);
+    if (detectedSource) state.lead_source = detectedSource;
 
     const fromManyChat = body.channel === "messenger" || body.source === "manychat";
     const originalJson = res.json.bind(res);
