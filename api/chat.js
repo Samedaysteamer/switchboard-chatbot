@@ -206,6 +206,26 @@ function normalizeZip(input = "") {
   return m ? m[1] : "";
 }
 
+function extractAddress(text = "") {
+  const s = String(text || "").trim();
+  if (!s) return "";
+  if (s.length < 8) return "";
+  if (/^(yes|no|n\/a|none|skip)$/i.test(s)) return "";
+
+  const hasNumber = /\b\d{1,6}\s+[A-Za-z0-9]/.test(s);
+  const hasStreetType =
+    /\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|trl|trail)\b/i.test(
+      s
+    );
+  const hasCityStateZip = /,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}\b/.test(s);
+  const hasZip = /\b\d{5}(?:-\d{4})?\b/.test(s);
+
+  if (hasNumber && (hasStreetType || hasCityStateZip || hasZip)) {
+    return s.slice(0, 180);
+  }
+  return "";
+}
+
 function clampHistory(arr, maxLen = 18) {
   const a = Array.isArray(arr) ? arr : [];
   if (a.length <= maxLen) return a;
@@ -1118,6 +1138,10 @@ function hydrateStateFromUserText(userText, state) {
     const z = normalizeZip(txt);
     if (z) state.zip = z;
   }
+  if (!state.address && !state.Address && !state.service_address) {
+    const a = extractAddress(txt);
+    if (a) state.address = a;
+  }
   return state;
 }
 
@@ -1126,6 +1150,14 @@ function computeZipHint(state, userText) {
   if (!z) return { zip: "", in_area: null };
   const inArea = zipInArea(z);
   return { zip: z, in_area: inArea };
+}
+
+function hasUsableAddress(state = {}) {
+  const addr = String(state.address || state.Address || state.service_address || "").trim();
+  if (!addr) return false;
+  if (/please provide your full address/i.test(addr)) return false;
+  if (/^(none|n\/a|unknown)$/i.test(addr)) return false;
+  return true;
 }
 
 /* ========================= LLM-FIRST Turn ========================= */
@@ -1418,6 +1450,22 @@ async function handleCorePOST(req, res) {
     // Main turn
     const result = await llmTurn(user, state);
     const nextState = result.state || state;
+    const draftReply = String(result.reply || "");
+    const draftLooksSummaryOrFinalize =
+      /booking summary/i.test(draftReply) ||
+      /is there anything you(?:’|'|)d like to change before i finalize/i.test(draftReply) ||
+      /finaliz/i.test(draftReply);
+    const missingAddress = !hasUsableAddress(nextState);
+
+    // Never allow final confirmation/booking completion without a real address.
+    if (missingAddress && (nextState.booking_complete || draftLooksSummaryOrFinalize)) {
+      nextState.booking_complete = false;
+      return res.status(200).json({
+        reply: "What is the full address for the cleaning?",
+        quickReplies: [],
+        state: nextState,
+      });
+    }
 
     // Zapier automation:
     // - Session Zap once we have name + phone (and haven't sent)
