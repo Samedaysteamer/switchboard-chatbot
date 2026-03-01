@@ -284,35 +284,44 @@ function _lastAssistantAskedFloor(history = []) {
 
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
-  const candidates = [];
-  const push = (v) => {
-    if (typeof v === "string") {
-      const s = v.trim();
-      if (s) candidates.push(s);
-    }
+  const asText = (v) => {
+    if (typeof v !== "string") return "";
+    const s = v.trim();
+    return s || "";
   };
 
-  push(body.text);
-  push(body.message);
-  push(body.input);
-  push(body.payload);
-  push(body.content);
-  push(body.question);
-  push(body.prompt);
-  push(body.user_message);
-  push(body.userMessage);
+  // Priority order: explicit user-input fields first.
+  const direct = [
+    body.text,
+    body.message,
+    body.input,
+    body.user_message,
+    body.userMessage,
+    body.payload,
+    body.question,
+    body.prompt,
+    body?.message?.text,
+    body?.data?.message,
+    body?.data?.text,
+    body?.event?.message?.text,
+    body?.event?.text,
+    body?.entry?.[0]?.messaging?.[0]?.message?.text,
+  ];
 
-  push(body?.message?.text);
-  push(body?.data?.message);
-  push(body?.data?.text);
-  push(body?.event?.message?.text);
-  push(body?.event?.text);
-  push(body?.entry?.[0]?.messaging?.[0]?.message?.text);
-
-  if (Array.isArray(body?.content?.messages)) {
-    for (const m of body.content.messages) push(m?.text);
+  for (const v of direct) {
+    const s = asText(v);
+    if (s) return s;
   }
 
+  // If a messages array exists, use the latest text message.
+  if (Array.isArray(body?.content?.messages)) {
+    for (let i = body.content.messages.length - 1; i >= 0; i--) {
+      const s = asText(body.content.messages[i]?.text);
+      if (s) return s;
+    }
+  }
+
+  // Last-resort scan: ignore known transport/state fields.
   const deny = new Set([
     "state",
     "state_json",
@@ -324,14 +333,18 @@ function extractUserText(body = {}) {
     "hub.challenge",
     "object",
     "entry",
+    "reply",
+    "reply_text",
+    "version",
   ]);
+
   for (const [k, v] of Object.entries(body || {})) {
     if (deny.has(k)) continue;
-    if (typeof v === "string") push(v);
+    const s = asText(v);
+    if (s) return s;
   }
 
-  candidates.sort((a, b) => b.length - a.length);
-  return candidates[0] || "";
+  return "";
 }
 
 /* ========================= ZIP Gate Data ========================= */
@@ -892,6 +905,7 @@ UPHOLSTERY (LOCKED)
 Always ask what pieces they need cleaned first.
 If they say sofa/couch/loveseat/sectional: ask cushion count:
 “How many people can it comfortably sit?”
+If they ask price for a sofa/couch/loveseat/sectional, ask how many people it comfortably sits before giving any price.
 Treat sofa/couch/loveseat/sectional as cushion pricing.
 Pricing:
 - Cushion total: $50 x cushion count (internal only; do not say “per cushion”)
@@ -910,11 +924,11 @@ BUNDLE DISCOUNT + PROFIT PROTECTION (LOCKED)
 If BOTH carpet + upholstery are booked in the same conversation, apply -$50 to the combined total.
 If bundle is active and upholstery subtotal would be under $100, treat upholstery as $100 BEFORE applying the -$50.
 Never explain. Only show:
-“Bundle discount: -$50”
-“New combined total: $___”
+“New combined total: $___” (already includes the -$50)
 Then ask: “Would you like to proceed with booking?” (Do NOT ask for ZIP until they say yes.)
 
 UPSELL ORDERING (LOCKED)
+If the current quote already includes BOTH carpet and upholstery, treat it as an active bundle immediately: apply the -$50 in the combined total, DO NOT ask a pre-ZIP upsell question, and ask only: “Would you like to proceed with booking?”
 After customer says YES to proceed on:
 - Carpet: offer upholstery ONCE before ZIP:
 “Before we move forward, if you bundle upholstery with carpet today, you qualify for $50 off the combined total. Would you like to add upholstery cleaning?”
