@@ -504,6 +504,45 @@ function _toNumber(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function _normalizeDateForZap(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+
+  // Keep mm/dd or mm/dd/yyyy-style input, normalized to mm/dd.
+  const md = s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/);
+  if (md) {
+    const mm = String(parseInt(md[1], 10)).padStart(2, "0");
+    const dd = String(parseInt(md[2], 10)).padStart(2, "0");
+    return `${mm}/${dd}`;
+  }
+
+  // Handle "March 2", "March 2, 2026", "March 2nd", etc.
+  const words = s.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*\d{2,4})?\b/i
+  );
+  if (words) {
+    const m = words[1].toLowerCase();
+    const d = String(parseInt(words[2], 10)).padStart(2, "0");
+    const map = {
+      january: "01",
+      february: "02",
+      march: "03",
+      april: "04",
+      may: "05",
+      june: "06",
+      july: "07",
+      august: "08",
+      september: "09",
+      october: "10",
+      november: "11",
+      december: "12",
+    };
+    return `${map[m] || ""}/${d}`.replace(/^\/+/, "");
+  }
+
+  return s;
+}
+
 function _deriveFromHistory(state = {}) {
   const hist = Array.isArray(state._history) ? state._history : [];
   if (!hist.length) return {};
@@ -593,7 +632,7 @@ function _deriveFromHistory(state = {}) {
 
   // Date
   const dateLine = text.match(
-    /(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i
+    /(?:preferred\s*day|date|cleaning\s*date)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i
   );
   if (dateLine) out.date = dateLine[1].trim();
   else {
@@ -637,8 +676,19 @@ function buildZapPayloadFromState(state = {}) {
   const phone = extractTenDigit(phoneRaw) || String(phoneRaw || "");
   const email = String(_first(state.email, state.email2025, d.email)).toLowerCase();
 
-  const address = _first(state.address, state.Address, state.service_address, d.address);
-  const date = _first(state.date, state.cleaningDate, state.CleaningDate, d.date);
+  const address = _first(state.address, state.Address, state.service_address, state.fullAddress, d.address);
+  const dateRaw = _first(
+    state.date,
+    state.Date,
+    state.cleaningDate,
+    state.CleaningDate,
+    state.preferred_date,
+    state.preferredDate,
+    state.appointmentDate,
+    state.appointment_date,
+    d.date
+  );
+  const date = _normalizeDateForZap(dateRaw);
   const window = _first(state.window, state.Window, state.arrival_window, state.arrivalWindow, d.window);
 
   const pets = _first(state.pets, state.Pets, d.pets);
@@ -669,18 +719,31 @@ function buildZapPayloadFromState(state = {}) {
 
   return {
     Cleaning_Breakdown: cleaningBreakdown || "",
+    cleaning_breakdown: cleaningBreakdown || "",
     "selected service": selectedService || "",
+    selected_service: selectedService || "",
     "Total Price": totalPrice || 0,
+    total_price: totalPrice || 0,
     name2025: name || "",
+    name: name || "",
     phone2025: phone || "",
+    phone: phone || "",
     email2025: email || "",
+    email: email || "",
     Address: address || "",
+    address: address || "",
     date: date || "",
+    Date: date || "",
+    cleaningDate: date || "",
     Window: window || "",
+    window: window || "",
     pets: pets || "",
     OutdoorWater: outdoorWater || "",
+    outdoorWater: outdoorWater || "",
     BuildingType: building || "",
+    buildingType: building || "",
     Notes: notes || "",
+    notes: notes || "",
     lead_source: leadSource || "",
     is_facebook_booking: leadSource === "facebook" ? "yes" : "no",
     booking_complete: !!state.booking_complete,
