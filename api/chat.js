@@ -487,19 +487,6 @@ async function sendSessionZapFormEncoded(payload) {
   }
 }
 
-function buildZapDedupeKey(payload = {}) {
-  return [
-    String(payload["selected service"] || "").toLowerCase().trim(),
-    String(payload.Cleaning_Breakdown || "").toLowerCase().trim(),
-    String(payload.Address || "").toLowerCase().trim(),
-    String(payload.date || "").toLowerCase().trim(),
-    String(payload.Window || "").toLowerCase().trim(),
-    String(payload.phone2025 || "").trim(),
-    String(payload.email2025 || "").toLowerCase().trim(),
-    String(payload["Total Price"] || "").trim(),
-  ].join("|");
-}
-
 /* ===== ZAPIER FIX (ONLY): Robust field mapping + history fill for blanks (NAME FIX INCLUDED) ===== */
 function _nonEmpty(v) {
   if (v == null) return false;
@@ -1587,15 +1574,11 @@ async function handleCorePOST(req, res) {
       }
     }
 
-    if (bookingComplete && !nextState._second_work_order_active) {
+    if (bookingComplete && !nextState._bookingSent) {
       try {
         const payload = buildZapPayloadFromState({ ...nextState, booking_complete: true });
-        const primaryKey = buildZapDedupeKey(payload);
-        if (primaryKey && primaryKey !== nextState._last_primary_booking_key) {
-          await sendBookingZapFormEncoded(payload);
-          nextState._last_primary_booking_key = primaryKey;
-          nextState._bookingSent = true;
-        }
+        await sendBookingZapFormEncoded(payload);
+        nextState._bookingSent = true;
       } catch (e) {
         console.error("Booking Zap send failed", e);
       }
@@ -1612,13 +1595,11 @@ async function handleCorePOST(req, res) {
     const looksFinalized =
       /finaliz/i.test(finalReply || "") ||
       /dispatcher/i.test(finalReply || "") ||
-      /678-929-8202/.test(finalReply || "") ||
-      /confirm/i.test(finalReply || "");
+      /678-929-8202/.test(finalReply || "");
 
     const upsellDone = !!nextState.post_booking_duct_upsell_done;
-    const shouldOfferPostBookingUpsell = !!nextState._bookingSent && !nextState._second_work_order_active;
 
-    if (shouldOfferPostBookingUpsell && !ductAlready && !upsellDone) {
+    if (bookingComplete && looksFinalized && !ductAlready && !upsellDone) {
       finalReply =
         String(finalReply || "").trim() + "\n\nBefore you go — would you like to add air duct cleaning as well?";
       finalQuickReplies = QR_DUCT_UPSELL.slice();
@@ -1635,13 +1616,9 @@ async function handleCorePOST(req, res) {
     ) {
       try {
         const payload = buildZapPayloadFromState({ ...nextState, booking_complete: true });
-        const secondKey = buildZapDedupeKey(payload);
-        if (secondKey && secondKey !== nextState._last_second_booking_key) {
-          await sendBookingZapFormEncoded(payload);
-          nextState._last_second_booking_key = secondKey;
-          nextState._second_bookingSent = true;
-          nextState._second_work_order_active = false;
-        }
+        await sendBookingZapFormEncoded(payload);
+        nextState._second_bookingSent = true;
+        nextState._second_work_order_active = false;
       } catch (e) {
         console.error("Second Booking Zap send failed", e);
       }
