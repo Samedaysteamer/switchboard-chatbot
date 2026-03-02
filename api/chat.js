@@ -1595,11 +1595,15 @@ async function handleCorePOST(req, res) {
     const looksFinalized =
       /finaliz/i.test(finalReply || "") ||
       /dispatcher/i.test(finalReply || "") ||
-      /678-929-8202/.test(finalReply || "");
+      /678-929-8202/.test(finalReply || "") ||
+      /confirm/i.test(finalReply || "");
 
     const upsellDone = !!nextState.post_booking_duct_upsell_done;
+    const shouldOfferPostBookingUpsell =
+      (bookingComplete || !!nextState._bookingSent || looksFinalized) &&
+      !nextState._second_work_order_active;
 
-    if (bookingComplete && looksFinalized && !ductAlready && !upsellDone) {
+    if (shouldOfferPostBookingUpsell && !ductAlready && !upsellDone) {
       finalReply =
         String(finalReply || "").trim() + "\n\nBefore you go — would you like to add air duct cleaning as well?";
       finalQuickReplies = QR_DUCT_UPSELL.slice();
