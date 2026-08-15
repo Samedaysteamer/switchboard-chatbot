@@ -1137,6 +1137,7 @@ Rules:
   - phone: 10-digit string
   - email: lowercase email
   - window: exactly "8 to 12" or "1 to 5"
+  - date: exactly "MM/DD/YYYY". Use the year from the TODAY system message unless the customer explicitly stated a different year. Never invent or guess a year.
 - booking_complete: true ONLY when the appointment is confirmed/finalized.
 - total_price: number (no $ sign)
 - selected_service: "Carpet" or "Upholstery" or "Air Duct" or combinations like "Carpet + Upholstery"
@@ -1254,9 +1255,18 @@ async function llmTurn(userText, state) {
 
   const zipHint = computeZipHint(s, userText);
 
+  /* ===== DATE FIX (ONLY): real current date, so OpenAI stops guessing a year ===== */
+  const todayParts = _getTodayParts();
+  const todayLabel = `${_pad2(todayParts.month)}/${_pad2(todayParts.day)}/${todayParts.year}`;
+  /* ===== END DATE FIX (ONLY) ===== */
+
   // Build conversation messages like OpenAI prompt testing (text-first)
   const msgs = [];
   msgs.push({ role: "system", content: SDS_MASTER_PROMPT_TEXT });
+  msgs.push({
+    role: "system",
+    content: `TODAY: ${todayLabel}. This is the real current date. Always use this exact year for any date you state or infer. Never invent, assume, or default to a different year.`,
+  }); // DATE FIX (ONLY)
 
   // Provide lightweight state + zip signal (does NOT force JSON replies)
   const stateSnapshot = (() => {
@@ -1300,6 +1310,7 @@ async function llmTurn(userText, state) {
   // Extractor pass to update state + quick replies
   const extractorMsgs = [
     { role: "system", content: SDS_EXTRACTOR_PROMPT },
+    { role: "system", content: `TODAY: ${todayLabel}. Use this exact year when normalizing "date". Never invent or guess a different year.` }, // DATE FIX (ONLY)
     { role: "system", content: `CURRENT_STATE: ${JSON.stringify(stateSnapshot)}` },
     { role: "system", content: `ZIP_CHECK: ${JSON.stringify(zipHint)}` },
     { role: "user", content: `USER: ${String(userText || "").trim()}\nASSISTANT: ${String(assistantReply || "").trim()}` },
