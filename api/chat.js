@@ -789,6 +789,8 @@ function _getTZDateParts(timeZone) {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
   });
   const parts = fmt.formatToParts(new Date());
   const out = {};
@@ -799,6 +801,7 @@ function _getTZDateParts(timeZone) {
     year: Number(out.year),
     month: Number(out.month),
     day: Number(out.day),
+    hour: Number(out.hour),
   };
 }
 
@@ -984,7 +987,7 @@ ABSOLUTE OUTPUT RULES (LOCKED)
 - No emojis, EXCEPT inside the duct package block (must be exactly as provided).
 
 GREETING (LOCKED)
-Start with: “Good morning. What do you need cleaned today: carpet, upholstery, or air ducts?”
+Start with: “Good {time of day}. What do you need cleaned today: carpet, upholstery, or air ducts?” — replace {time of day} with morning, afternoon, or evening using the real value from the TIME_OF_DAY system message. Never default to "morning" if the TIME_OF_DAY message says otherwise.
 
 ARRIVAL WINDOWS (LOCKED)
 Offer ONLY:
@@ -1112,11 +1115,11 @@ FINAL CONFIRMATION (LOCKED)
 Provide a clean summary in this exact order: Service, Name, Address, Email, Phone, Date, Arrival window, Pets, House or Apartment, Floor (if apartment), Outdoor water supply, Notes, Total. Never say “same as previous.” Then ask:
 “Is there anything you’d like to change before I finalize this?”
 If they say no, finalize and include:
-“If you have any questions or need changes, you can reach our dispatcher at 678-929-8202.”
+“You’ll get a confirmation text shortly, and our technician will call before arrival. If you have any questions or need changes, you can reach our dispatcher at 678-263-2338.”
 
 NON-SALES HARD STOP (LOCKED)
 If they mention reschedule/cancel/complaint/refund/past job:
-Say this is the sales line and they must contact dispatcher at 678-929-8202.
+Say this is the sales line and they must contact dispatcher at 678-263-2338.
 Collect only name, phone, and a brief reason. End.
 `.trim();
 
@@ -1260,6 +1263,15 @@ async function llmTurn(userText, state) {
   const todayLabel = `${_pad2(todayParts.month)}/${_pad2(todayParts.day)}/${todayParts.year}`;
   /* ===== END DATE FIX (ONLY) ===== */
 
+  /* ===== GREETING FIX (ONLY): real time of day, so it stops always saying "Good morning" ===== */
+  const timeOfDay =
+    todayParts.hour >= 5 && todayParts.hour < 12
+      ? "morning"
+      : todayParts.hour >= 12 && todayParts.hour < 17
+      ? "afternoon"
+      : "evening";
+  /* ===== END GREETING FIX (ONLY) ===== */
+
   // Build conversation messages like OpenAI prompt testing (text-first)
   const msgs = [];
   msgs.push({ role: "system", content: SDS_MASTER_PROMPT_TEXT });
@@ -1267,6 +1279,10 @@ async function llmTurn(userText, state) {
     role: "system",
     content: `TODAY: ${todayLabel}. This is the real current date. Always use this exact year for any date you state or infer. Never invent, assume, or default to a different year.`,
   }); // DATE FIX (ONLY)
+  msgs.push({
+    role: "system",
+    content: `TIME_OF_DAY: It is currently ${timeOfDay} (real local time). If you open with a "Good ___" greeting, it must be "Good ${timeOfDay}" — never default to morning if it isn't.`,
+  }); // GREETING FIX (ONLY)
 
   // Provide lightweight state + zip signal (does NOT force JSON replies)
   const stateSnapshot = (() => {
@@ -1606,7 +1622,7 @@ async function handleCorePOST(req, res) {
     const looksFinalized =
       /finaliz/i.test(finalReply || "") ||
       /dispatcher/i.test(finalReply || "") ||
-      /678-929-8202/.test(finalReply || "");
+      /678-263-2338/.test(finalReply || "");
 
     const upsellDone = !!nextState.post_booking_duct_upsell_done;
 
