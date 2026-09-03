@@ -741,6 +741,7 @@ function buildZapPayloadFromState(state = {}) {
     total_price: totalPrice || 0,
     name2025: name || "",
     name: name || "",
+    customer_name: name || "", // FIELD-NAME MATCH (ONLY): matches other bot's Zap
     phone2025: phone || "",
     phone: phone || "",
     email2025: email || "",
@@ -752,11 +753,14 @@ function buildZapPayloadFromState(state = {}) {
     cleaningDate: date || "",
     Window: window || "",
     window: window || "",
+    arrival_window: window || "", // FIELD-NAME MATCH (ONLY): matches other bot's Zap
     pets: pets || "",
     OutdoorWater: outdoorWater || "",
     outdoorWater: outdoorWater || "",
+    outdoor_water: outdoorWater || "", // FIELD-NAME MATCH (ONLY): matches other bot's Zap
     BuildingType: building || "",
     buildingType: building || "",
+    building_type: building || "", // FIELD-NAME MATCH (ONLY): matches other bot's Zap
     Notes: notes || "",
     notes: notes || "",
     lead_source: leadSource || "",
