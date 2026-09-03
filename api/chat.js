@@ -37,6 +37,13 @@ const SESSION_TTL_MIN = Math.max(
   parseInt(process.env.SESSION_TTL_MIN || "240", 10) || 240
 );
 
+/* ===== TRANSCRIPT FIX (ONLY): how often the Session Zap re-sends an updated transcript ===== */
+const TRANSCRIPT_RESEND_MIN = Math.max(
+  1,
+  parseInt(process.env.TRANSCRIPT_RESEND_MIN || "5", 10) || 5
+);
+/* ===== END TRANSCRIPT FIX (ONLY) ===== */
+
 /* ========================= Meta Messenger Direct Support ========================= */
 const FB_PAGE_ACCESS_TOKEN =
   process.env.PAGE_ACCESS_TOKEN || process.env.FB_PAGE_ACCESS_TOKEN || "";
@@ -162,8 +169,15 @@ function verifyFBSignature(req) {
 }
 
 function extractMetaIncoming(evt) {
+  // AD_ID FIX (ONLY): Meta only populates referral.ad_id on the first inbound event
+  // after a Click-to-Messenger ad tap. Check postback.referral (Get Started button ads),
+  // top-level referral (messaging_referrals, existing threads), and message.referral
+  // (messages webhook) since ad_id can arrive on any of these depending on the ad setup.
+  const referral = evt?.postback?.referral || evt?.referral || evt?.message?.referral || null;
+  const adId = referral && referral.ad_id ? String(referral.ad_id) : "";
+
   const isGetStarted = evt?.postback?.payload === "GET_STARTED";
-  if (isGetStarted) return { init: true, text: "" };
+  if (isGetStarted) return { init: true, text: "", ad_id: adId };
 
   const postbackPayload = evt?.postback?.payload;
   const postbackTitle = evt?.postback?.title;
@@ -171,7 +185,7 @@ function extractMetaIncoming(evt) {
   const txt = evt?.message?.text;
 
   const incoming = (postbackTitle || postbackPayload || quickPayload || txt || "").trim();
-  return { init: false, text: incoming };
+  return { init: false, text: incoming, ad_id: adId };
 }
 
 /* ========================= Utilities ========================= */
@@ -698,6 +712,7 @@ function buildZapPayloadFromState(state = {}) {
   const leadSource = String(
     _first(state.lead_source, state.leadSource, state.channel_source, state.sourceTag)
   ).toLowerCase();
+  const fbAdId = _first(state.fb_ad_id, state.ad_id); // AD_ID FIX (ONLY)
 
   const cleaningBreakdown = _first(
     state.Cleaning_Breakdown,
@@ -746,10 +761,27 @@ function buildZapPayloadFromState(state = {}) {
     notes: notes || "",
     lead_source: leadSource || "",
     is_facebook_booking: leadSource === "facebook" ? "yes" : "no",
+    fb_ad_id: fbAdId || "",
+    ad_id: fbAdId || "",
     booking_complete: !!state.booking_complete,
   };
 }
 /* ===== END ZAPIER FIX (ONLY) ===== */
+
+/* ===== TRANSCRIPT FIX (ONLY): readable full transcript, Session Zap only ===== */
+function formatTranscriptForZap(history = []) {
+  const hist = Array.isArray(history) ? history : [];
+  if (!hist.length) return "";
+  return hist
+    .map((m) => {
+      const who = m && m.role === "assistant" ? "Agent" : "Customer";
+      const text = String((m && m.content) || "").trim();
+      return text ? `${who}: ${text}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+/* ===== END TRANSCRIPT FIX (ONLY) ===== */
 
 /* ========================= QUICK REPLIES (FIX ONLY): deterministic + sanitize bad extractor buttons ========================= */
 const QR_SERVICE = ["Carpet Cleaning", "Upholstery Cleaning", "Air Duct Cleaning"];
@@ -1591,11 +1623,19 @@ async function handleCorePOST(req, res) {
     // - Booking Zap once booking_complete true (and haven't sent)
     const bookingComplete = !!nextState.booking_complete;
 
-    if (nextState.name && nextState.phone && !nextState._sessionSent) {
+    // TRANSCRIPT FIX (ONLY): resend at most once per TRANSCRIPT_RESEND_MIN, not on every turn,
+    // so the transcript stays roughly current through wherever the customer stops responding
+    // without multiplying Zap tasks on every message of an active conversation.
+    const msSinceLastTranscript = Date.now() - (Number(nextState._lastTranscriptSentAt) || 0);
+    const transcriptDue = !nextState._sessionSent || msSinceLastTranscript > TRANSCRIPT_RESEND_MIN * 60 * 1000;
+
+    if (nextState.name && nextState.phone && transcriptDue) {
       try {
         const payload = buildZapPayloadFromState({ ...nextState, booking_complete: false });
+        payload.full_transcript = formatTranscriptForZap(nextState._history); // Session Zap only
         await sendSessionZapFormEncoded(payload);
         nextState._sessionSent = true;
+        nextState._lastTranscriptSentAt = Date.now();
       } catch (e) {
         console.error("Session Zap send failed", e);
       }
@@ -1704,6 +1744,7 @@ module.exports = async (req, res) => {
         const incoming = extractMetaIncoming(evt);
         let storedState = (await getStateByPSID(psid)) || {};
         if (!Array.isArray(storedState._history)) storedState._history = [];
+        if (incoming.ad_id && !storedState.fb_ad_id) storedState.fb_ad_id = incoming.ad_id; // AD_ID FIX (ONLY)
 
         let captured = null;
 
