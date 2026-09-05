@@ -1143,6 +1143,9 @@ After in-area ZIP confirmed:
 10 Outdoor water supply
 11 Notes
 
+ADDRESS COMPLETENESS (LOCKED)
+The address must include a city. If the customer gives only a street address with no city, acknowledge the street they gave and ask specifically what city that is in — do not move on to Name until the address includes a city. Do not ask for ZIP again; that has already been collected.
+
 APARTMENT FLOOR (LOCKED)
 If the customer selects 4th floor or higher, say:
 “Thanks for letting me know. Apartments above the 3rd floor require a portable unit — someone will reach out to see if we can service it.”
@@ -1171,6 +1174,7 @@ Return a SINGLE JSON object ONLY with:
 
 Rules:
 - Keep previously known values from CURRENT_STATE unless new info replaces them.
+- address: if CURRENT_STATE.address already has a street but no city, and the customer's latest message is just a city name (a short place name, no street number), combine them into one full address — do not drop the street or replace it with just the city.
 - Normalize:
   - zip: 5-digit string
   - phone: 10-digit string
@@ -1273,11 +1277,26 @@ function computeZipHint(state, userText) {
   return { zip: z, in_area: inArea };
 }
 
+/* ===== ADDRESS CITY FIX (ONLY): require more than a bare street address ===== */
+function addressLooksCityComplete(text = "") {
+  const s = String(text || "").trim();
+  if (!s) return false;
+  // "123 Main St, Lawrenceville" or "..., Lawrenceville, GA" — a comma followed by more
+  // letters almost always means a city (or city+state) was given after the street.
+  if (/,\s*[A-Za-z]{2,}/.test(s)) return true;
+  // "123 Main St Lawrenceville GA" — an explicit state token strongly implies a city
+  // was typed before it, even without a comma.
+  if (/\b(GA|Georgia)\b/i.test(s)) return true;
+  return false;
+}
+/* ===== END ADDRESS CITY FIX (ONLY) ===== */
+
 function hasUsableAddress(state = {}) {
   const addr = String(state.address || state.Address || state.service_address || "").trim();
   if (!addr) return false;
   if (/please provide your full address/i.test(addr)) return false;
   if (/^(none|n\/a|unknown)$/i.test(addr)) return false;
+  if (!addressLooksCityComplete(addr)) return false; // ADDRESS CITY FIX (ONLY)
   return true;
 }
 
@@ -1612,11 +1631,20 @@ async function handleCorePOST(req, res) {
       /finaliz/i.test(draftReply);
     const missingAddress = !hasUsableAddress(nextState);
 
-    // Never allow final confirmation/booking completion without a real address.
+    // Never allow final confirmation/booking completion without a real, city-complete address.
     if (missingAddress && (nextState.booking_complete || draftLooksSummaryOrFinalize)) {
       nextState.booking_complete = false;
+      const existingAddrText = String(
+        nextState.address || nextState.Address || nextState.service_address || ""
+      ).trim();
+      const hasSomeAddress =
+        existingAddrText &&
+        !/please provide your full address/i.test(existingAddrText) &&
+        !/^(none|n\/a|unknown)$/i.test(existingAddrText);
+      // ADDRESS CITY FIX (ONLY): ask specifically for the city if we already have a street,
+      // instead of re-asking for the full address from scratch.
       return res.status(200).json({
-        reply: "What is the full address for the cleaning?",
+        reply: hasSomeAddress ? "What city is that in?" : "What is the full address for the cleaning?",
         quickReplies: [],
         state: nextState,
       });
