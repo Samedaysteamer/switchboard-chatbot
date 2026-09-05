@@ -614,8 +614,12 @@ function _deriveFromHistory(state = {}) {
   if (zip) out.zip = zip[0];
 
   // NAME (FIX): safe extraction
+  // [ \t] instead of \s below on purpose: \s also matches newlines, and the AI's own summary
+  // lists "Name: X" immediately followed by "Address: ..." on the next line — with bare \s
+  // this regex would swallow that next line's label into the captured name (e.g. "Mikyle
+  // Walker\nAddress"). [ \t] is horizontal-whitespace-only, so it can't cross the line break.
   const nameLine = text.match(
-    /\bname\s*[:\-]\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)+)\b/i
+    /\bname\s*[:\-][ \t]*([A-Za-z][A-Za-z.'-]+(?:[ \t]+[A-Za-z][A-Za-z.'-]+)+)\b/i
   );
   if (nameLine && looksLikeFullName(nameLine[1])) {
     out.name = nameLine[1].trim();
