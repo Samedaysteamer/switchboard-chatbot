@@ -329,6 +329,20 @@ function _lastAssistantAskedFloor(history = []) {
   return false;
 }
 
+/* ===== BOOKING TIMING FIX (ONLY): was the confirm question already asked on a prior turn? ===== */
+function _lastAssistantAskedFinalConfirm(history = []) {
+  const hist = Array.isArray(history) ? history : [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i]?.role === "assistant") {
+      return /is there anything you(?:’|'|)d like to change before i finalize/i.test(
+        String(hist[i].content || "")
+      );
+    }
+  }
+  return false;
+}
+/* ===== END BOOKING TIMING FIX (ONLY) ===== */
+
 /* ========================= Robust input extraction ========================= */
 function extractUserText(body = {}) {
   const asText = (v) => {
@@ -1421,6 +1435,21 @@ async function llmTurn(userText, state) {
     s.address = prevGoodAddress;
   }
 
+  /* ===== ADDRESS ZIP FIX (ONLY): append the already-known ZIP once the address has a city =====
+     We already collect ZIP ourselves via the ZIP gate — don't make the customer retype it.
+     Once the address is street+city complete, glue the known zip onto it (if not already
+     present) so the final summary and every Zapier payload always carry a full address. */
+  if (hasUsableAddress(s) && s.zip) {
+    const addrField = s.address ? "address" : s.Address ? "Address" : s.service_address ? "service_address" : null;
+    if (addrField) {
+      const currentAddr = String(s[addrField]).trim();
+      if (!currentAddr.includes(s.zip)) {
+        s[addrField] = `${currentAddr}, ${s.zip}`;
+      }
+    }
+  }
+  /* ===== END ADDRESS ZIP FIX (ONLY) ===== */
+
   // If this is a second work order and the customer confirmed same info,
   // lock contact fields to the original values and prevent bad overwrites.
   if (s._second_work_order_active && s._reuse_prev_info && s._prev_contact) {
@@ -1621,6 +1650,9 @@ async function handleCorePOST(req, res) {
       }
     }
 
+    // BOOKING TIMING FIX (ONLY): capture this BEFORE llmTurn mutates state._history
+    const priorTurnAlreadyAskedToConfirm = _lastAssistantAskedFinalConfirm(state._history);
+
     // Main turn
     const result = await llmTurn(user, state);
     const nextState = result.state || state;
@@ -1648,6 +1680,14 @@ async function handleCorePOST(req, res) {
         quickReplies: [],
         state: nextState,
       });
+    }
+
+    // BOOKING TIMING FIX (ONLY): the extractor can prematurely mark booking_complete true on
+    // the SAME turn that first shows the summary + "anything to change?" question — before the
+    // customer has actually replied to it. Force it back to false unless a PRIOR turn already
+    // asked that exact question (i.e. this turn is the customer's reply to it).
+    if (nextState.booking_complete && !priorTurnAlreadyAskedToConfirm) {
+      nextState.booking_complete = false;
     }
 
     // Zapier automation:
@@ -1691,10 +1731,12 @@ async function handleCorePOST(req, res) {
     const bd = String(nextState.Cleaning_Breakdown || nextState.cleaning_breakdown || nextState.breakdown || "");
     const ductAlready = /duct/i.test(svc) || /duct/i.test(bd);
 
+    // BOOKING TIMING FIX (ONLY): dropped the old /finaliz/i check — it also matched the
+    // confirm-question's own "before I finalize this?" wording, not just the true finalize
+    // message, which let the duct-upsell text get appended a turn too early. "dispatcher" and
+    // the phone number only ever appear in the actual finalize message, so they're precise.
     const looksFinalized =
-      /finaliz/i.test(finalReply || "") ||
-      /dispatcher/i.test(finalReply || "") ||
-      /678-263-2338/.test(finalReply || "");
+      /dispatcher/i.test(finalReply || "") || /678-263-2338/.test(finalReply || "");
 
     const upsellDone = !!nextState.post_booking_duct_upsell_done;
 
